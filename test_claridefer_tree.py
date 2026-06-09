@@ -75,6 +75,15 @@ report("Unweighted three-leaf CLARITree test", y_test, pred_unweighted)
 print("\nUnweighted objective:", obj_unweighted)
 print(tree_unweighted.print_tree())
 
+feature_names = list(data.feature_names)
+
+print("\nUnweighted leaf paths:")
+print(tree_unweighted.print_leaf_paths())
+
+dot_unweighted = tree_unweighted.plot_tree(feature_names=feature_names)
+dot_unweighted.render("unweighted_clari_tree", format="png", cleanup=True)
+
+
 tree_weighted = CLARITree(
     kappa=0.01,
     depth=5,

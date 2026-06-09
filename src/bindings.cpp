@@ -64,6 +64,63 @@ void bind_tree_methods(py::class_<Tree, Options...>& cls) {
        .def("n_leaves", &Tree::n_leaves);
 }
 
+template <typename Tree, typename... Options>
+void bind_leaf_path_methods(py::class_<Tree, Options...>& cls) {
+    cls.def("print_leaf_paths", &Tree::print_leaf_paths)
+       .def("export_leaf_paths",
+            [](const Tree& self) {
+                py::list out;
+
+                const auto paths = self.export_leaf_paths();
+
+                for (const auto& leaf : paths) {
+                    py::dict d;
+
+                    py::list conditions;
+                    for (const auto& c : leaf.conditions) {
+                        py::dict cd;
+                        cd["feature_idx"] = c.feature_idx;
+                        cd["threshold"] = c.threshold;
+                        cd["op"] = c.is_leq ? "<=" : ">";
+                        conditions.append(cd);
+                    }
+
+                    d["conditions"] = conditions;
+                    d["leaf_type"] =
+                        leaf.leaf_type == LeafType::CONSTANT ? "CONSTANT" :
+                        leaf.leaf_type == LeafType::DEFER    ? "DEFER" :
+                                                                "LINEAR";
+
+                    d["obj"] = leaf.obj;
+                    d["n_instances"] = leaf.n_instances;
+
+                    if (leaf.leaf_type == LeafType::CONSTANT) {
+                        d["prediction"] = leaf.constant_prediction;
+                    } else if (leaf.leaf_type == LeafType::DEFER) {
+                        d["prediction"] = "reference";
+                    } else {
+                        py::list coefs;
+                        for (int i = 0; i < leaf.coefficients.size(); ++i) {
+                            coefs.append(leaf.coefficients(i));
+                        }
+
+                        py::list cont;
+                        for (int j : leaf.continuous_idx) {
+                            cont.append(j);
+                        }
+
+                        d["coefficients"] = coefs;
+                        d["continuous_idx"] = cont;
+                    }
+
+                    out.append(d);
+                }
+
+                return out;
+            },
+            "Return root-to-leaf paths with split conditions and leaf prediction/defer/linear model.");
+}
+
 } // namespace
 
 template <typename Tree>
@@ -272,6 +329,7 @@ PYBIND11_MODULE(_core, m) {
             py::arg("min_leaf_node_size") = 0);
 
     bind_tree_methods(greedy);
+    bind_leaf_path_methods(greedy);
     bind_three_leaf_methods(greedy);
 
     py::class_<CLARITree, Greedy> clari_tree(m, "CLARITree");
@@ -313,6 +371,7 @@ PYBIND11_MODULE(_core, m) {
                 py::arg("min_leaf_node_size") = 0);
 
     bind_tree_methods(clari_tree);
+    bind_leaf_path_methods(clari_tree);
     bind_three_leaf_methods(clari_tree);
 
     py::class_<GreedyConst> greedy_const(m, "GreedyConst");

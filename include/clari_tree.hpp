@@ -50,6 +50,35 @@ public:
     ) const; // print subtree
 };
 
+struct PathCondition {
+    int feature_idx = -1;
+    double threshold = 0.0;
+    bool is_leq = true;  // true: x_j <= threshold, false: x_j > threshold
+};
+
+struct LeafPathExport {
+    std::vector<PathCondition> conditions;
+
+    LeafType leaf_type = LeafType::LINEAR;
+
+    // leaf metadata
+    double obj = 0.0;
+    std::size_t n_instances = 0;
+
+    // constant leaf
+    double constant_prediction = 0.0;
+
+    // linear leaf
+    Eigen::VectorXd coefficients;
+
+    // for linear leaves, coefficients are:
+    // coefficients[0] = intercept
+    // coefficients[1 + k] corresponds to continuous_idx[k]
+    std::vector<int> continuous_idx;
+
+    // dEFER leaf has no coefficients; prediction is reference_pred
+};
+
 //
 // ========== Greedy ==========
 // Greedy regression tree with ridge regression in each leaf
@@ -88,6 +117,10 @@ public:
 
     int min_leaf_node_size;   // requested minimum samples per leaf; <= 0 means auto
     Node* root;          // root node
+
+    std::vector<LeafPathExport> export_leaf_paths() const;
+
+    std::string print_leaf_paths() const;
 
     Greedy(double kappa, Depth depth, double lambda = 0.0, int n_thresholds = 1, bool verbose = true, int min_leaf_node_size = 0);
     Greedy(double kappa, Depth depth, double lambda, int n_thresholds, const std::string& thresholds_strategy, bool verbose = true, int min_leaf_node_size = 0);
@@ -222,6 +255,14 @@ private:
         Node* node,
         Depth depth_remaining
     );
+
+    void export_leaf_paths_rec_(
+        const Node* node,
+        std::vector<PathCondition>& cur,
+        std::vector<LeafPathExport>& out
+    ) const;
+
+    static std::string leaf_type_to_string_(LeafType t);
 
   
 };

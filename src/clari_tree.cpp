@@ -1401,6 +1401,143 @@ std::string Greedy::print_tree()
     return this->root->print_tree(0, this->continuous_idx_);
 }
 
+std::string Greedy::leaf_type_to_string_(LeafType t) {
+    if (t == LeafType::CONSTANT) return "CONSTANT";
+    if (t == LeafType::DEFER)    return "DEFER";
+    return "LINEAR";
+}
+
+std::vector<LeafPathExport> Greedy::export_leaf_paths() const {
+    std::vector<LeafPathExport> out;
+    if (this->root == nullptr) {
+        return out;
+    }
+
+    std::vector<PathCondition> cur;
+    export_leaf_paths_rec_(this->root, cur, out);
+    return out;
+}
+
+void Greedy::export_leaf_paths_rec_(
+    const Node* node,
+    std::vector<PathCondition>& cur,
+    std::vector<LeafPathExport>& out
+) const {
+    if (node == nullptr) {
+        return;
+    }
+
+    if (node->is_leaf) {
+        LeafPathExport e;
+        e.conditions = cur;
+        e.leaf_type = node->leaf_type;
+        e.obj = node->obj;
+        e.n_instances = node->n_instances;
+        e.constant_prediction = node->constant_prediction;
+        e.coefficients = node->coefficients;
+        e.continuous_idx = this->continuous_idx_;
+        out.push_back(e);
+        return;
+    }
+
+    // left branch: x_feature <= threshold
+    cur.push_back(PathCondition{
+        static_cast<int>(node->feature_idx),
+        node->threshold,
+        true
+    });
+    export_leaf_paths_rec_(node->left, cur, out);
+    cur.pop_back();
+
+    // right branch: x_feature > threshold
+    cur.push_back(PathCondition{
+        static_cast<int>(node->feature_idx),
+        node->threshold,
+        false
+    });
+    export_leaf_paths_rec_(node->right, cur, out);
+    cur.pop_back();
+}
+
+std::string Greedy::print_leaf_paths() const {
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss << std::setprecision(6);
+
+    const auto paths = export_leaf_paths();
+
+    if (paths.empty()) {
+        return "No tree currently fit!\n";
+    }
+
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        const auto& leaf = paths[i];
+
+        oss << "Leaf " << i << ":\n";
+
+        if (leaf.conditions.empty()) {
+            oss << "  IF <root>\n";
+        } else {
+            oss << "  IF ";
+            for (std::size_t k = 0; k < leaf.conditions.size(); ++k) {
+                const auto& c = leaf.conditions[k];
+                if (k > 0) {
+                    oss << " AND ";
+                }
+
+                oss << "x_" << c.feature_idx;
+                if (c.is_leq) {
+                    oss << " <= ";
+                } else {
+                    oss << " > ";
+                }
+                oss << c.threshold;
+            }
+            oss << "\n";
+        }
+
+        oss << "  n = " << leaf.n_instances << "\n";
+        oss << "  obj = " << leaf.obj << "\n";
+        oss << "  leaf_type = " << leaf_type_to_string_(leaf.leaf_type) << "\n";
+
+        if (leaf.leaf_type == LeafType::CONSTANT) {
+            oss << "  prediction = " << leaf.constant_prediction << "\n";
+        } else if (leaf.leaf_type == LeafType::DEFER) {
+            oss << "  prediction = reference prediction\n";
+        } else {
+            oss << "  prediction = ";
+
+            if (leaf.coefficients.size() == 0) {
+                oss << "<no coefficients>";
+            } else {
+                oss << leaf.coefficients(0);
+
+                for (std::size_t k = 0; k < leaf.continuous_idx.size(); ++k) {
+                    const int coef_idx = 1 + static_cast<int>(k);
+                    if (coef_idx >= leaf.coefficients.size()) {
+                        break;
+                    }
+
+                    const double bj = leaf.coefficients(coef_idx);
+                    if (bj >= 0.0) {
+                        oss << " + " << bj;
+                    } else {
+                        oss << " - " << std::abs(bj);
+                    }
+
+                    oss << "*x_" << leaf.continuous_idx[k];
+                }
+            }
+
+            oss << "\n";
+        }
+
+        oss << "\n";
+    }
+
+    return oss.str();
+}
+
 std::size_t Greedy::count_leaves(const Node* n) {
     if (!n) return 0;
     if (n->is_leaf) return 1;
