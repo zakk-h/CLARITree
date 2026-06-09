@@ -96,6 +96,36 @@ void bind_three_leaf_methods(py::class_<Tree, Greedy>& cls) {
             py::arg("reference_pred"),
             py::arg("categorical_idx") = std::vector<int>(),
             "Fit the three-leaf tree with (X, y, reference_pred). Returns objective loss.")
+       .def("fit_weighted",
+            [](Tree& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& sample_weight,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit_weighted(X, y, sample_weight, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("sample_weight"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the tree with sample weights. Returns objective loss.")
+       .def("fit_with_reference_and_weights",
+            [](Tree& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred,
+               const Eigen::Ref<const Eigen::VectorXd>& sample_weight,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit_with_reference_and_weights(X, y, reference_pred, sample_weight, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("reference_pred"),
+            py::arg("sample_weight"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the three-leaf tree with reference predictions and sample weights. Returns objective loss.")
        .def("predict",
             [](Tree& self,
                const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -147,6 +177,36 @@ void bind_three_leaf_methods(py::class_<Greedy>& cls) {
             py::arg("reference_pred"),
             py::arg("categorical_idx") = std::vector<int>(),
             "Fit the three-leaf tree with (X, y, reference_pred). Returns objective loss.")
+       .def("fit_weighted",
+            [](Greedy& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& sample_weight,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit_weighted(X, y, sample_weight, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("sample_weight"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the tree with sample weights. Returns objective loss.")
+       .def("fit_with_reference_and_weights",
+            [](Greedy& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred,
+               const Eigen::Ref<const Eigen::VectorXd>& sample_weight,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit_with_reference_and_weights(X, y, reference_pred, sample_weight, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("reference_pred"),
+            py::arg("sample_weight"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the three-leaf tree with reference predictions and sample weights. Returns objective loss.")
        .def("predict",
             [](Greedy& self,
                const Eigen::Ref<const Eigen::MatrixXd>& X,

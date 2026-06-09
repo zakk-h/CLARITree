@@ -82,6 +82,10 @@ public:
     Eigen::VectorXd reference_pred_centered_; // reference predictions centered by y_mean_
     Eigen::VectorXd defer_resid_sq_;          // (centered y - centered reference)^2
     bool has_reference_pred_ = false;         // true when fit(..., reference_pred, ...) is used
+    
+    Eigen::VectorXd sample_weight_;
+    double total_weight_ = 0.0;
+
     int min_leaf_node_size;   // requested minimum samples per leaf; <= 0 means auto
     Node* root;          // root node
 
@@ -110,6 +114,23 @@ public:
             Eigen::VectorXd reference_pred,
             const std::vector<int>& categorical_idx = {});
 
+    double fit_weighted(Eigen::MatrixXd X,
+                    Eigen::VectorXd y,
+                    Eigen::VectorXd sample_weight,
+                    const std::vector<int>& categorical_idx = {});
+
+    double fit(Eigen::MatrixXd X,
+            Eigen::VectorXd y,
+            Eigen::VectorXd reference_pred,
+            Eigen::VectorXd sample_weight,
+            const std::vector<int>& categorical_idx = {});
+
+    double fit_with_reference_and_weights(Eigen::MatrixXd X,
+                                        Eigen::VectorXd y,
+                                        Eigen::VectorXd reference_pred,
+                                        Eigen::VectorXd sample_weight,
+                                        const std::vector<int>& categorical_idx = {});
+
     void fit_coefficients(Node* node,
                         Eigen::MatrixXd X,
                         Eigen::VectorXd y,
@@ -129,27 +150,31 @@ public:
             const Eigen::VectorXd& b,
             double y_sum_sq) const;
 
-    double constant_loss(int n, double y_sum, double y_sum_sq) const;
+    double constant_loss(double weight_sum, double wy_sum, double wy_sum_sq) const;
 
-    double best_three_leaf_objective(int n,
-                                    double y_sum,
-                                    double y_sum_sq,
+    double best_three_leaf_objective(double weight_sum,
+                                    double wy_sum,
+                                    double wy_sum_sq,
                                     const Eigen::LLT<Eigen::MatrixXd>& llt,
                                     const Eigen::VectorXd& b,
                                     double defer_sse) const;
 
-    LeafType best_leaf_type(int n,
-                            double y_sum,
-                            double y_sum_sq,
+    LeafType best_leaf_type(double weight_sum,
+                            double wy_sum,
+                            double wy_sum_sq,
                             const Eigen::LLT<Eigen::MatrixXd>& llt,
                             const Eigen::VectorXd& b,
                             double defer_sse) const;
 
-    double sum_y_from_sorted_indices(
+    double sum_weight_from_sorted_indices(
         const std::vector<std::vector<unsigned long int>>& sorted_indices
     ) const;
 
-    double sum_defer_sse_from_sorted_indices(
+    double sum_weighted_y_from_sorted_indices(
+        const std::vector<std::vector<unsigned long int>>& sorted_indices
+    ) const;
+
+    double sum_weighted_defer_sse_from_sorted_indices(
         const std::vector<std::vector<unsigned long int>>& sorted_indices
     ) const;
 

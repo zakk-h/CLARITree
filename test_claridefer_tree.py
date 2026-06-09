@@ -46,7 +46,16 @@ ref_test = ref_model.predict(X_test)
 report("Reference XGBoost train", y_train, ref_train)
 report("Reference XGBoost test", y_test, ref_test)
 
-tree = CLARITree(
+sample_weight = np.ones_like(y_train, dtype=float)
+sample_weight[y_train >= np.quantile(y_train, 0.75)] = 5.0
+
+print("\nSample weight summary")
+print("min:", sample_weight.min())
+print("max:", sample_weight.max())
+print("mean:", sample_weight.mean())
+print("num high-weight:", np.sum(sample_weight > 1.0))
+
+tree_unweighted = CLARITree(
     kappa=0.01,
     depth=5,
     lambda_=0.005,
@@ -58,10 +67,40 @@ tree = CLARITree(
     min_leaf_node_size=50,
 )
 
-obj = tree.fit_with_reference(X_train, y_train, ref_train)
-pred = tree.predict_with_reference(X_test, ref_test)
+obj_unweighted = tree_unweighted.fit_with_reference(X_train, y_train, ref_train)
+pred_unweighted = tree_unweighted.predict_with_reference(X_test, ref_test)
 
-report("Three-leaf CLARITree test", y_test, pred)
+report("Unweighted three-leaf CLARITree test", y_test, pred_unweighted)
 
-print("\nObjective:", obj)
-print(tree.print_tree())
+print("\nUnweighted objective:", obj_unweighted)
+print(tree_unweighted.print_tree())
+
+tree_weighted = CLARITree(
+    kappa=0.01,
+    depth=5,
+    lambda_=0.005,
+    rho=0.05,
+    eta=0.50,
+    n_thresholds=30,
+    thresholds_strategy="quantile",
+    verbose=True,
+    min_leaf_node_size=50,
+)
+
+obj_weighted = tree_weighted.fit_with_reference_and_weights(
+    X_train,
+    y_train,
+    ref_train,
+    sample_weight,
+)
+
+pred_weighted = tree_weighted.predict_with_reference(X_test, ref_test)
+
+report("Weighted three-leaf CLARITree test", y_test, pred_weighted)
+
+high_test = y_test >= np.quantile(y_train, 0.75)
+report("Unweighted CLARITree high-y test subset", y_test[high_test], pred_unweighted[high_test])
+report("Weighted CLARITree high-y test subset", y_test[high_test], pred_weighted[high_test])
+
+print("\nWeighted objective:", obj_weighted)
+print(tree_weighted.print_tree())

@@ -408,6 +408,8 @@ Greedy &Greedy::operator=(const Greedy &other)
         reference_pred_centered_ = other.reference_pred_centered_;
         defer_resid_sq_ = other.defer_resid_sq_;
         has_reference_pred_ = other.has_reference_pred_;
+        sample_weight_ = other.sample_weight_;
+        total_weight_ = other.total_weight_;
         traversed_thresholds_ = other.traversed_thresholds_;
         threshold_pool_ = other.threshold_pool_;
         resolved_min_leaf_node_size_ = other.resolved_min_leaf_node_size_;
@@ -433,6 +435,8 @@ Greedy::Greedy(const Greedy &other)
       reference_pred_centered_(other.reference_pred_centered_),
       defer_resid_sq_(other.defer_resid_sq_),
       has_reference_pred_(other.has_reference_pred_),
+      sample_weight_(other.sample_weight_),
+      total_weight_(other.total_weight_),
       traversed_thresholds_(other.traversed_thresholds_),
       threshold_pool_(other.threshold_pool_),
       resolved_min_leaf_node_size_(other.resolved_min_leaf_node_size_)
@@ -491,11 +495,20 @@ void Greedy::build_threshold_pool(const std::vector<std::vector<unsigned long in
 
 double Greedy::fit(MatrixXd X, VectorXd y, const std::vector<int>& categorical_idx)
 {
+    Eigen::VectorXd sample_weight = Eigen::VectorXd::Ones(y.size());
+    return fit_weighted(X, y, sample_weight, categorical_idx);
+}
+
+double Greedy::fit_weighted(MatrixXd X,
+                            VectorXd y,
+                            VectorXd sample_weight,
+                            const std::vector<int>& categorical_idx)
+{
     const double old_eta = this->eta;
     this->eta = std::numeric_limits<double>::infinity();
 
     Eigen::VectorXd dummy_ref = y;
-    double out = fit(X, y, dummy_ref, categorical_idx);
+    double out = fit(X, y, dummy_ref, sample_weight, categorical_idx);
 
     this->eta = old_eta;
     this->has_reference_pred_ = false;
@@ -508,8 +521,44 @@ double Greedy::fit(MatrixXd X,
                    VectorXd reference_pred,
                    const std::vector<int>& categorical_idx)
 {
+    Eigen::VectorXd sample_weight = Eigen::VectorXd::Ones(y.size());
+    return fit(X, y, reference_pred, sample_weight, categorical_idx);
+}
+
+double Greedy::fit_with_reference_and_weights(MatrixXd X,
+                                              VectorXd y,
+                                              VectorXd reference_pred,
+                                              VectorXd sample_weight,
+                                              const std::vector<int>& categorical_idx)
+{
+    return fit(X, y, reference_pred, sample_weight, categorical_idx);
+}
+
+double Greedy::fit(MatrixXd X,
+                   VectorXd y,
+                   VectorXd reference_pred,
+                   VectorXd sample_weight,
+                   const std::vector<int>& categorical_idx)
+{
     if (reference_pred.size() != y.size()) {
         throw std::runtime_error("fit: reference_pred must have the same length as y.");
+    }
+
+    if (sample_weight.size() != y.size()) {
+        throw std::runtime_error("fit: sample_weight must have the same length as y.");
+    }
+
+    for (int i = 0; i < sample_weight.size(); ++i) {
+        if (!std::isfinite(sample_weight(i)) || sample_weight(i) < 0.0) {
+            throw std::runtime_error("fit: sample_weight entries must be finite and nonnegative.");
+        }
+    }
+
+    this->sample_weight_ = sample_weight;
+    this->total_weight_ = sample_weight.sum();
+
+    if (!(this->total_weight_ > 0.0)) {
+        throw std::runtime_error("fit: sample_weight must have positive total weight.");
     }
 
     ensure_intercept_inplace(X);
@@ -538,14 +587,14 @@ double Greedy::fit(MatrixXd X,
     detect_feature_types();
     resolve_min_leaf_node_size();
 
-    double mean_y = y.mean();
-    double tss = (y.array() - mean_y).matrix().squaredNorm();
+    double mean_y = sample_weight.dot(y) / this->total_weight_;
+    double tss = (sample_weight.array() * (y.array() - mean_y).square()).sum();
     this->scaled_lambda = this->lambda * tss;
-    this->scaled_kappa = this->n * this->kappa;
+    this->scaled_kappa = this->total_weight_ * this->kappa;
 
     const double mean_tol = 1e-6;
     const double std_tol = 1e-3;
-    const bool x_is_standardized = is_standardized_cols(this->X, continuous_idx_, mean_tol, std_tol);
+    const bool x_is_standardized = false;
     const bool y_is_centered = std::abs(mean_y) <= mean_tol;
 
     const int cont_n = static_cast<int>(continuous_idx_.size());
@@ -555,8 +604,8 @@ double Greedy::fit(MatrixXd X,
     for (int k = 0; k < cont_n; ++k) {
         const int j = continuous_idx_[k];
         const Eigen::VectorXd col = this->X.col(j);
-        const double mu = col.mean();
-        const double var = (col.array() - mu).square().mean();
+        const double mu = sample_weight.dot(col) / this->total_weight_;
+        const double var = (sample_weight.array() * (col.array() - mu).square()).sum() / this->total_weight_;
         double sd = std::sqrt(var);
         if (sd < 1e-12) {
             sd = 1.0;
@@ -597,22 +646,34 @@ double Greedy::fit(MatrixXd X,
         throw std::runtime_error("Provide continuous columns (no non-binary, non-categorical numeric features found).");
     }
 
-    MatrixXd gram = X_reg_.transpose() * X_reg_ + scaled_kappa * MatrixXd::Identity(p_reg_, p_reg_);
-    gram(0,0) -= scaled_kappa - 1e-12;
+    MatrixXd gram = scaled_kappa * MatrixXd::Identity(p_reg_, p_reg_);
+    gram(0,0) = 1e-12;
+    VectorXd b = VectorXd::Zero(p_reg_);
+
+    double wy_sum = 0.0;
+    double wy_sum_sq = 0.0;
+    double defer_sse = 0.0;
+
+    for (int i = 0; i < this->n; ++i) {
+        const double w = this->sample_weight_(i);
+        const Eigen::RowVectorXd xr = reg_row(i);
+
+        gram.noalias() += w * xr.transpose() * xr;
+        b.noalias() += w * xr.transpose() * this->y(i);
+
+        wy_sum += w * this->y(i);
+        wy_sum_sq += w * this->y(i) * this->y(i);
+        defer_sse += w * this->defer_resid_sq_(i);
+    }
 
     LLT<MatrixXd> lltOfA(gram);
-    VectorXd b = X_reg_.transpose() * this->y;
-
-    double y_sum = this->y.sum();
-    double y_sum_sq = this->y.squaredNorm();
-    double defer_sse = this->defer_resid_sq_.sum();
 
     delete this->root;
     this->root = new Node();
     this->root->obj = best_three_leaf_objective(
-        static_cast<int>(this->n),
-        y_sum,
-        y_sum_sq,
+        this->total_weight_,
+        wy_sum,
+        wy_sum_sq,
         lltOfA,
         b,
         defer_sse
@@ -630,7 +691,7 @@ double Greedy::fit(MatrixXd X,
 
     build_threshold_pool(sorted_indices);
 
-    double objective = recursive_fit(sorted_indices, lltOfA, b, y_sum_sq, this->root, this->depth);
+    double objective = recursive_fit(sorted_indices, lltOfA, b, wy_sum_sq, this->root, this->depth);
 
     std::vector<int> all_rows(this->n);
     std::iota(all_rows.begin(), all_rows.end(), 0);
@@ -662,29 +723,43 @@ void Greedy::fit_coefficients(Node *node,
             Xloc.col(1 + k) = (X.col(continuous_idx_[k]).array() - x_mean_(k)) / x_std_(k);
         }
 
-        MatrixXd gram = Xloc.transpose() * Xloc + scaled_kappa * MatrixXd::Identity(Xloc.cols(), Xloc.cols());
-        gram(0, 0) -= scaled_kappa - 1e-12;
+        MatrixXd gram = scaled_kappa * MatrixXd::Identity(Xloc.cols(), Xloc.cols());
+        gram(0, 0) = 1e-12;
+        VectorXd b = VectorXd::Zero(Xloc.cols());
+
+        double weight_sum = 0.0;
+        double wy_sum = 0.0;
+        double wy_sum_sq = 0.0;
+
+        for (int local_i = 0; local_i < nloc; ++local_i) {
+            const int original_row = original_rows[local_i];
+            const double w = sample_weight_(original_row);
+            const Eigen::RowVectorXd xr = Xloc.row(local_i);
+
+            gram.noalias() += w * xr.transpose() * xr;
+            b.noalias() += w * xr.transpose() * y(local_i);
+
+            weight_sum += w;
+            wy_sum += w * y(local_i);
+            wy_sum_sq += w * y(local_i) * y(local_i);
+        }
 
         LLT<MatrixXd> llt(gram);
-        VectorXd b = Xloc.transpose() * y;
-
-        double y_sum = y.sum();
-        double y_sum_sq = y.squaredNorm();
 
         double defer_sse = std::numeric_limits<double>::infinity();
         if (has_reference_pred_) {
             defer_sse = 0.0;
             for (int original_row : original_rows) {
-                defer_sse += defer_resid_sq_(original_row);
+                defer_sse += sample_weight_(original_row) * defer_resid_sq_(original_row);
             }
         }
 
-        node->leaf_type = best_leaf_type(nloc, y_sum, y_sum_sq, llt, b, defer_sse);
-        node->obj = best_three_leaf_objective(nloc, y_sum, y_sum_sq, llt, b, defer_sse);
+        node->leaf_type = best_leaf_type(weight_sum, wy_sum, wy_sum_sq, llt, b, defer_sse);
+        node->obj = best_three_leaf_objective(weight_sum, wy_sum, wy_sum_sq, llt, b, defer_sse);
 
         if (node->leaf_type == LeafType::CONSTANT)
         {
-            node->constant_prediction = y_sum / static_cast<double>(nloc) + y_mean_;
+            node->constant_prediction = wy_sum / weight_sum + y_mean_;
             node->coefficients = Eigen::VectorXd::Constant(1, node->constant_prediction);
             return;
         }
@@ -753,12 +828,13 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
     */
     node->n_instances = node_instance_count_from_sorted_indices(sorted_indices, this->m);
 
-    const double node_y_sum = sum_y_from_sorted_indices(sorted_indices);
-    const double node_defer_sse = sum_defer_sse_from_sorted_indices(sorted_indices);
+    const double node_weight_sum = sum_weight_from_sorted_indices(sorted_indices);
+    const double node_wy_sum = sum_weighted_y_from_sorted_indices(sorted_indices);
+    const double node_defer_sse = sum_weighted_defer_sse_from_sorted_indices(sorted_indices);
 
     node->obj = best_three_leaf_objective(
-        static_cast<int>(node->n_instances),
-        node_y_sum,
+        node_weight_sum,
+        node_wy_sum,
         y_sum_sq,
         llt,
         b,
@@ -799,21 +875,26 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             left_rows.reserve(sorted_indices[feature].size());
             right_rows.reserve(sorted_indices[feature].size());
 
-            double y_sum_left = 0.0;
-            double y_sum_right = 0.0;
+            double weight_left = 0.0;
+            double weight_right = 0.0;
+            double wy_sum_left = 0.0;
+            double wy_sum_right = 0.0;
             double defer_sse_left = 0.0;
             double defer_sse_right = 0.0;
 
             for (unsigned long int row : sorted_indices[feature])
             {
+                const double w = this->sample_weight_(row);
                 if (this->X((int)row, feature) <= 0.5) {
                     left_rows.push_back((int)row);
-                    y_sum_left += this->y(row);
-                    if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
+                    weight_left += w;
+                    wy_sum_left += w * this->y(row);
+                    if (has_reference_pred_) defer_sse_left += w * this->defer_resid_sq_(row);
                 } else {
                     right_rows.push_back((int)row);
-                    y_sum_right += this->y(row);
-                    if (has_reference_pred_) defer_sse_right += this->defer_resid_sq_(row);
+                    weight_right += w;
+                    wy_sum_right += w * this->y(row);
+                    if (has_reference_pred_) defer_sse_right += w * this->defer_resid_sq_(row);
                 }
             }
             if (!children_respect_min_leaf_size(left_rows.size(), right_rows.size()))
@@ -824,8 +905,8 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             auto [lltR, bR, yssR] = recompute_stats_from_rows(right_rows);
 
            double left_obj = best_three_leaf_objective(
-                static_cast<int>(left_rows.size()),
-                y_sum_left,
+                weight_left,
+                wy_sum_left,
                 yssL,
                 lltL,
                 bL,
@@ -833,8 +914,8 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             );
 
             double right_obj = best_three_leaf_objective(
-                static_cast<int>(right_rows.size()),
-                y_sum_right,
+                weight_right,
+                wy_sum_right,
                 yssR,
                 lltR,
                 bR,
@@ -873,7 +954,8 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
         VectorXd b_left = VectorXd::Zero(p_reg_);
         LLT<MatrixXd> llt_left(gram_left);
         double y_sum_sq_left = 0.0;
-        double y_sum_left = 0.0;
+        double weight_left = 0.0;
+        double wy_sum_left = 0.0;
         double defer_sse_left = 0.0;
 
         vector<int> left_indices = {};
@@ -882,24 +964,31 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
         LLT<MatrixXd> llt_right = llt;
 
         double y_sum_sq_right = y_sum_sq;
-        double y_sum_right = node_y_sum;
+        double weight_right = node_weight_sum;
+        double wy_sum_right = node_wy_sum;
         double defer_sse_right = has_reference_pred_ ? node_defer_sse : 0.0;
         std::size_t pool_idx = 0;
         for (unsigned long int feature_idx = 0; feature_idx < sorted_indices[feature].size(); feature_idx++)
         {
             int row = sorted_indices[feature][feature_idx]; // get the row index for this feature & threshold
-            b_left += reg_row(row).transpose() * this->y(row);
-            llt_left.rankUpdate(reg_row(row), 1);
-            y_sum_sq_left += this->y(row) * this->y(row);
-            y_sum_left += this->y(row);
-            if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
+            const double w = this->sample_weight_(row);
+            const Eigen::RowVectorXd xr = reg_row(row);
+            const Eigen::RowVectorXd xr_weighted = std::sqrt(w) * xr;
+
+            b_left += w * xr.transpose() * this->y(row);
+            llt_left.rankUpdate(xr_weighted, 1);
+            y_sum_sq_left += w * this->y(row) * this->y(row);
+            weight_left += w;
+            wy_sum_left += w * this->y(row);
+            if (has_reference_pred_) defer_sse_left += w * this->defer_resid_sq_(row);
             left_indices.push_back(row);
 
-            b_right -= reg_row(row).transpose() * this->y(row);
-            llt_right.rankUpdate(reg_row(row), -1);
-            y_sum_sq_right -= this->y(row) * this->y(row);
-            y_sum_right -= this->y(row);
-            if (has_reference_pred_) defer_sse_right -= this->defer_resid_sq_(row);
+            b_right -= w * xr.transpose() * this->y(row);
+            llt_right.rankUpdate(xr_weighted, -1);
+            y_sum_sq_right -= w * this->y(row) * this->y(row);
+            weight_right -= w;
+            wy_sum_right -= w * this->y(row);
+            if (has_reference_pred_) defer_sse_right -= w * this->defer_resid_sq_(row);
             if (feature_idx == sorted_indices[feature].size() - 1)
             {
                 // if this is the last feature index, we can't split further
@@ -930,8 +1019,8 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
                 // double left_obj = loss(llt_left.matrixL(), b_left, y_sum_sq_left) + this->scaled_lambda;
                 // double right_obj = loss(llt_right.matrixL(), b_right, y_sum_sq_right) + this->scaled_lambda;
                 double left_obj = best_three_leaf_objective(
-                    static_cast<int>(left_count),
-                    y_sum_left,
+                    weight_left,
+                    wy_sum_left,
                     y_sum_sq_left,
                     llt_left,
                     b_left,
@@ -939,13 +1028,14 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
                 );
 
                 double right_obj = best_three_leaf_objective(
-                    static_cast<int>(right_count),
-                    y_sum_right,
+                    weight_right,
+                    wy_sum_right,
                     y_sum_sq_right,
                     llt_right,
                     b_right,
                     defer_sse_right
                 );
+
                 if (left_obj + right_obj < min_obj)
                 {
                     split_flag = true;
@@ -1065,53 +1155,53 @@ double Greedy::loss(const LLT<MatrixXd>& llt,
     return y_sum_sq - z.squaredNorm();
 }
 
-double Greedy::constant_loss(int n, double y_sum, double y_sum_sq) const
+double Greedy::constant_loss(double weight_sum, double wy_sum, double wy_sum_sq) const
 {
-    if (n <= 0) {
+    if (!(weight_sum > 0.0)) {
         return std::numeric_limits<double>::infinity();
     }
-    return y_sum_sq - y_sum * y_sum / static_cast<double>(n);
+    return wy_sum_sq - wy_sum * wy_sum / weight_sum;
 }
 
-double Greedy::best_three_leaf_objective(int n,
-                                         double y_sum,
-                                         double y_sum_sq,
+double Greedy::best_three_leaf_objective(double weight_sum,
+                                         double wy_sum,
+                                         double wy_sum_sq,
                                          const LLT<MatrixXd>& llt,
                                          const VectorXd& b,
                                          double defer_sse) const
 {
-    if (n <= 0) {
+    if (!(weight_sum > 0.0)) {
         return std::numeric_limits<double>::infinity();
     }
 
-    const double const_obj = constant_loss(n, y_sum, y_sum_sq);
-    const double linear_obj = loss(llt, b, y_sum_sq) + rho * static_cast<double>(n);
+    const double const_obj = constant_loss(weight_sum, wy_sum, wy_sum_sq);
+    const double linear_obj = loss(llt, b, wy_sum_sq) + rho * weight_sum;
 
     double defer_obj = std::numeric_limits<double>::infinity();
-    if (has_reference_pred_) {
-        defer_obj = defer_sse + eta * static_cast<double>(n);
+    if (has_reference_pred_ && std::isfinite(eta)) {
+        defer_obj = defer_sse + eta * weight_sum;
     }
 
     return this->scaled_lambda + std::min({const_obj, linear_obj, defer_obj});
 }
 
-LeafType Greedy::best_leaf_type(int n,
-                                double y_sum,
-                                double y_sum_sq,
+LeafType Greedy::best_leaf_type(double weight_sum,
+                                double wy_sum,
+                                double wy_sum_sq,
                                 const LLT<MatrixXd>& llt,
                                 const VectorXd& b,
                                 double defer_sse) const
 {
-    if (n <= 0) {
+    if (!(weight_sum > 0.0)) {
         return LeafType::CONSTANT;
     }
 
-    const double const_obj = constant_loss(n, y_sum, y_sum_sq);
-    const double linear_obj = loss(llt, b, y_sum_sq) + rho * static_cast<double>(n);
+    const double const_obj = constant_loss(weight_sum, wy_sum, wy_sum_sq);
+    const double linear_obj = loss(llt, b, wy_sum_sq) + rho * weight_sum;
 
     double defer_obj = std::numeric_limits<double>::infinity();
-    if (has_reference_pred_) {
-        defer_obj = defer_sse + eta * static_cast<double>(n);
+    if (has_reference_pred_ && std::isfinite(eta)) {
+        defer_obj = defer_sse + eta * weight_sum;
     }
 
     if (const_obj <= linear_obj && const_obj <= defer_obj) {
@@ -1123,13 +1213,13 @@ LeafType Greedy::best_leaf_type(int n,
     return LeafType::DEFER;
 }
 
-double Greedy::sum_y_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
+double Greedy::sum_weight_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
 {
     for (unsigned long int feature = 1; feature < this->m; ++feature) {
         if (!sorted_indices[feature].empty()) {
             double out = 0.0;
             for (unsigned long int row : sorted_indices[feature]) {
-                out += this->y(row);
+                out += this->sample_weight_(row);
             }
             return out;
         }
@@ -1137,7 +1227,21 @@ double Greedy::sum_y_from_sorted_indices(const std::vector<std::vector<unsigned 
     return 0.0;
 }
 
-double Greedy::sum_defer_sse_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
+double Greedy::sum_weighted_y_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
+{
+    for (unsigned long int feature = 1; feature < this->m; ++feature) {
+        if (!sorted_indices[feature].empty()) {
+            double out = 0.0;
+            for (unsigned long int row : sorted_indices[feature]) {
+                out += this->sample_weight_(row) * this->y(row);
+            }
+            return out;
+        }
+    }
+    return 0.0;
+}
+
+double Greedy::sum_weighted_defer_sse_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
 {
     if (!has_reference_pred_) {
         return std::numeric_limits<double>::infinity();
@@ -1147,7 +1251,7 @@ double Greedy::sum_defer_sse_from_sorted_indices(const std::vector<std::vector<u
         if (!sorted_indices[feature].empty()) {
             double out = 0.0;
             for (unsigned long int row : sorted_indices[feature]) {
-                out += this->defer_resid_sq_(row);
+                out += this->sample_weight_(row) * this->defer_resid_sq_(row);
             }
             return out;
         }
@@ -1155,7 +1259,6 @@ double Greedy::sum_defer_sse_from_sorted_indices(const std::vector<std::vector<u
 
     return 0.0;
 }
-
 
 VectorXd Greedy::predict(MatrixXd X)
 {
@@ -1416,10 +1519,11 @@ auto Greedy::recompute_stats_from_rows(const std::vector<int>& rows)
     VectorXd bb = VectorXd::Zero(p_reg_);
     double yss = 0.0;
     for (int r : rows) {
+        const double w = this->sample_weight_(r);
         auto xr = reg_row(r);
-        bb.noalias()   += xr.transpose() * this->y(r);
-        gram.noalias() += xr.transpose() * xr;
-        yss += this->y(r) * this->y(r);
+        bb.noalias()   += w * xr.transpose() * this->y(r);
+        gram.noalias() += w * xr.transpose() * xr;
+        yss += w * this->y(r) * this->y(r);
     }
     LLT<MatrixXd> lltmp(gram);
     return {lltmp, bb, yss};
@@ -1450,12 +1554,13 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
     */
     node->n_instances = node_instance_count_from_sorted_indices(sorted_indices, this->m);
 
-    const double node_y_sum = sum_y_from_sorted_indices(sorted_indices);
-    const double node_defer_sse = sum_defer_sse_from_sorted_indices(sorted_indices);
+    const double node_weight_sum = sum_weight_from_sorted_indices(sorted_indices);
+    const double node_wy_sum = sum_weighted_y_from_sorted_indices(sorted_indices);
+    const double node_defer_sse = sum_weighted_defer_sse_from_sorted_indices(sorted_indices);
 
     node->obj = best_three_leaf_objective(
-        static_cast<int>(node->n_instances),
-        node_y_sum,
+        node_weight_sum,
+        node_wy_sum,
         y_sum_sq,
         llt,
         b,
@@ -1496,22 +1601,28 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
             left_rows.reserve(sorted_indices[feature].size());
             right_rows.reserve(sorted_indices[feature].size());
 
-            double y_sum_left = 0.0;
-            double y_sum_right = 0.0;
+            double weight_left = 0.0;
+            double weight_right = 0.0;
+            double wy_sum_left = 0.0;
+            double wy_sum_right = 0.0;
             double defer_sse_left = 0.0;
             double defer_sse_right = 0.0;
 
             // Split by 0/1 using only current node's samples
             for (unsigned long int row : sorted_indices[feature])
             {
+                const double w = this->sample_weight_(row);
+
                 if (this->X((int)row, feature) <= 0.5) {
                     left_rows.push_back((int)row);
-                    y_sum_left += this->y(row);
-                    if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
+                    weight_left += w;
+                    wy_sum_left += w * this->y(row);
+                    if (has_reference_pred_) defer_sse_left += w * this->defer_resid_sq_(row);
                 } else {
                     right_rows.push_back((int)row);
-                    y_sum_right += this->y(row);
-                    if (has_reference_pred_) defer_sse_right += this->defer_resid_sq_(row);
+                    weight_right += w;
+                    wy_sum_right += w * this->y(row);
+                    if (has_reference_pred_) defer_sse_right += w * this->defer_resid_sq_(row);
                 }
             }
             if (!children_respect_min_leaf_size(left_rows.size(), right_rows.size()))
@@ -1522,8 +1633,8 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
             auto [lltR, bR, yssR] = recompute_stats_from_rows(right_rows);
 
             double left_obj = best_three_leaf_objective(
-                static_cast<int>(left_rows.size()),
-                y_sum_left,
+                weight_left,
+                wy_sum_left,
                 yssL,
                 lltL,
                 bL,
@@ -1531,8 +1642,8 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
             );
 
             double right_obj = best_three_leaf_objective(
-                static_cast<int>(right_rows.size()),
-                y_sum_right,
+                weight_right,
+                wy_sum_right,
                 yssR,
                 lltR,
                 bR,
@@ -1627,7 +1738,8 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
         VectorXd b_left = VectorXd::Zero(p_reg_);
         LLT<MatrixXd> llt_left(gram_left);
         double y_sum_sq_left = 0.0;
-        double y_sum_left = 0.0;
+        double weight_left = 0.0;
+        double wy_sum_left = 0.0;
         double defer_sse_left = 0.0;
 
         vector<unsigned long int> left_indices = {};
@@ -1636,24 +1748,31 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
         LLT<MatrixXd> llt_right = llt;
 
         double y_sum_sq_right = y_sum_sq;
-        double y_sum_right = node_y_sum;
+        double weight_right = node_weight_sum;
+        double wy_sum_right = node_wy_sum;
         double defer_sse_right = has_reference_pred_ ? node_defer_sse : 0.0;
         std::size_t pool_idx = 0;
         for (unsigned long int feature_idx = 0; feature_idx < sorted_indices[feature].size(); feature_idx++)
         {
             int row = sorted_indices[feature][feature_idx]; // get the row index for this feature & threshold
-            b_left += reg_row(row).transpose() * this->y(row);
-            llt_left.rankUpdate(reg_row(row), 1);
-            y_sum_sq_left += this->y(row) * this->y(row);
-            y_sum_left += this->y(row);
-            if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
+            const double w = this->sample_weight_(row);
+            const Eigen::RowVectorXd xr = reg_row(row);
+            const Eigen::RowVectorXd xr_weighted = std::sqrt(w) * xr;
+
+            b_left += w * xr.transpose() * this->y(row);
+            llt_left.rankUpdate(xr_weighted, 1);
+            y_sum_sq_left += w * this->y(row) * this->y(row);
+            weight_left += w;
+            wy_sum_left += w * this->y(row);
+            if (has_reference_pred_) defer_sse_left += w * this->defer_resid_sq_(row);
             left_indices.push_back(row);
 
-            b_right -= reg_row(row).transpose() * this->y(row);
-            llt_right.rankUpdate(reg_row(row), -1);
-            y_sum_sq_right -= this->y(row) * this->y(row);
-            y_sum_right -= this->y(row);
-            if (has_reference_pred_) defer_sse_right -= this->defer_resid_sq_(row);
+            b_right -= w * xr.transpose() * this->y(row);
+            llt_right.rankUpdate(xr_weighted, -1);
+            y_sum_sq_right -= w * this->y(row) * this->y(row);
+            weight_right -= w;
+            wy_sum_right -= w * this->y(row);
+            if (has_reference_pred_) defer_sse_right -= w * this->defer_resid_sq_(row);
             if (feature_idx == sorted_indices[feature].size() - 1)
             {
                 // if this is the last feature index, we can't split further
@@ -1682,8 +1801,8 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
                 record_traversed_threshold(feature, candidate_threshold);
                 // loss estimate based on greedy completion
                 double left_obj = best_three_leaf_objective(
-                    static_cast<int>(left_count),
-                    y_sum_left,
+                    weight_left,
+                    wy_sum_left,
                     y_sum_sq_left,
                     llt_left,
                     b_left,
@@ -1691,8 +1810,8 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
                 );
 
                 double right_obj = best_three_leaf_objective(
-                    static_cast<int>(right_count),
-                    y_sum_right,
+                    weight_right,
+                    wy_sum_right,
                     y_sum_sq_right,
                     llt_right,
                     b_right,
