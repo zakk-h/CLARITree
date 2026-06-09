@@ -8,9 +8,16 @@
 #include <Eigen/Dense>
 #include <cstddef>
 #include <limits>
+#include <tuple>
 
 // Depth is an int across the tree API.
 using Depth = int;
+
+enum class LeafType {
+    CONSTANT = 0,
+    LINEAR = 1,
+    DEFER = 2
+};
 
 //
 // ========== Node ==========
@@ -26,6 +33,9 @@ public:
     double threshold;             // threshold used for splitting
     int feature_idx;              // feature index used for splitting
     Eigen::VectorXd coefficients; // ridge regression coefficients
+
+    LeafType leaf_type; // CONSTANT, LINEAR, or DEFER
+    double constant_prediction;   // prediction used by constant leaves
 
     Node();
     ~Node();
@@ -56,6 +66,8 @@ public:
     double lambda;       // penalty on number of leaf nodes
     double scaled_kappa; // scaled by n
     double scaled_lambda;// scaled by TSS
+    double rho;          // extra local cost per sample for linear leaves
+    double eta;          // extra local cost per sample for defer leaves
     int n_thresholds;    // maximum number of thresholds per continuous feature
     std::string thresholds_strategy; // threshold generation strategy
     std::vector<int> continuous_idx_;  // indices in X (excluding intercept col 0)
@@ -67,18 +79,41 @@ public:
     Eigen::VectorXd x_mean_;  // mean of continuous features (for standardization)
     Eigen::VectorXd x_std_;   // std of continuous features (for standardization)
     double y_mean_ = 0.0;     // mean of y (for centering)
+    Eigen::VectorXd reference_pred_centered_; // reference predictions centered by y_mean_
+    Eigen::VectorXd defer_resid_sq_;          // (centered y - centered reference)^2
+    bool has_reference_pred_ = false;         // true when fit(..., reference_pred, ...) is used
     int min_leaf_node_size;   // requested minimum samples per leaf; <= 0 means auto
     Node* root;          // root node
 
     Greedy(double kappa, Depth depth, double lambda = 0.0, int n_thresholds = 1, bool verbose = true, int min_leaf_node_size = 0);
     Greedy(double kappa, Depth depth, double lambda, int n_thresholds, const std::string& thresholds_strategy, bool verbose = true, int min_leaf_node_size = 0);
+
+    // three-leaf objective constructors.
+    Greedy(double kappa, Depth depth, double lambda, double rho, double eta,
+        int n_thresholds = 1, bool verbose = true, int min_leaf_node_size = 0);
+
+    Greedy(double kappa, Depth depth, double lambda, double rho, double eta,
+        int n_thresholds, const std::string& thresholds_strategy,
+        bool verbose = true, int min_leaf_node_size = 0);
+
+    
     virtual ~Greedy();
 
     Greedy& operator=(const Greedy& other);
     Greedy(const Greedy& other);
 
-    double fit(Eigen::MatrixXd X, Eigen::VectorXd y, const std::vector<int>& categorical_idx = {}); // fit tree, return objective
-    void fit_coefficients(Node* node, Eigen::MatrixXd X, Eigen::VectorXd y);
+    double fit(Eigen::MatrixXd X, Eigen::VectorXd y, const std::vector<int>& categorical_idx = {});
+
+    // three-leaf fit with reference predictions.
+    double fit(Eigen::MatrixXd X,
+            Eigen::VectorXd y,
+            Eigen::VectorXd reference_pred,
+            const std::vector<int>& categorical_idx = {});
+
+    void fit_coefficients(Node* node,
+                        Eigen::MatrixXd X,
+                        Eigen::VectorXd y,
+                        const std::vector<int>& original_rows);
 
     virtual double recursive_fit(
         std::vector<std::vector<unsigned long int>>& sorted_indices,
@@ -91,10 +126,38 @@ public:
 
     // double loss(Eigen::MatrixXd L, Eigen::VectorXd b, double y_sum_sq);
     double loss(const Eigen::LLT<Eigen::MatrixXd>& llt,
-                const Eigen::VectorXd& b,
-                double y_sum_sq);
+            const Eigen::VectorXd& b,
+            double y_sum_sq) const;
+
+    double constant_loss(int n, double y_sum, double y_sum_sq) const;
+
+    double best_three_leaf_objective(int n,
+                                    double y_sum,
+                                    double y_sum_sq,
+                                    const Eigen::LLT<Eigen::MatrixXd>& llt,
+                                    const Eigen::VectorXd& b,
+                                    double defer_sse) const;
+
+    LeafType best_leaf_type(int n,
+                            double y_sum,
+                            double y_sum_sq,
+                            const Eigen::LLT<Eigen::MatrixXd>& llt,
+                            const Eigen::VectorXd& b,
+                            double defer_sse) const;
+
+    double sum_y_from_sorted_indices(
+        const std::vector<std::vector<unsigned long int>>& sorted_indices
+    ) const;
+
+    double sum_defer_sse_from_sorted_indices(
+        const std::vector<std::vector<unsigned long int>>& sorted_indices
+    ) const;
+
     Eigen::VectorXd predict(Eigen::MatrixXd X);
+    Eigen::VectorXd predict(Eigen::MatrixXd X, Eigen::VectorXd reference_pred);
+
     double predict_row(Eigen::VectorXd x);
+    double predict_row(Eigen::VectorXd x, double reference_value);
 
     std::string print_tree();
     std::vector<std::vector<double>> get_traversed_thresholds() const;
@@ -146,6 +209,14 @@ class CLARITree : public Greedy {
 public:
     CLARITree(double kappa, Depth depth, double lambda = 0.0, int n_thresholds = 1, bool verbose = true, int min_leaf_node_size = 0);
     CLARITree(double kappa, Depth depth, double lambda, int n_thresholds, const std::string& thresholds_strategy, bool verbose = true, int min_leaf_node_size = 0);
+
+    // three-leaf objective constructors.
+    CLARITree(double kappa, Depth depth, double lambda, double rho, double eta,
+            int n_thresholds = 1, bool verbose = true, int min_leaf_node_size = 0);
+
+    CLARITree(double kappa, Depth depth, double lambda, double rho, double eta,
+            int n_thresholds, const std::string& thresholds_strategy,
+            bool verbose = true, int min_leaf_node_size = 0);
 
     double recursive_fit(
         std::vector<std::vector<unsigned long int>>& sorted_indices,

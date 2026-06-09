@@ -9,8 +9,8 @@ namespace py = pybind11;
 
 namespace {
 
-template <typename Tree>
-void bind_tree_methods(py::class_<Tree>& cls) {
+template <typename Tree, typename... Options>
+void bind_tree_methods(py::class_<Tree, Options...>& cls) {
     cls.def("fit",
             [](Tree& self,
                const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -66,43 +66,194 @@ void bind_tree_methods(py::class_<Tree>& cls) {
 
 } // namespace
 
+template <typename Tree>
+void bind_three_leaf_methods(py::class_<Tree, Greedy>& cls) {
+    cls.def("fit",
+            [](Tree& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit(X, y, reference_pred, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("reference_pred"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the three-leaf tree with (X, y, reference_pred). Returns objective loss.")
+       .def("fit_with_reference",
+            [](Tree& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit(X, y, reference_pred, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("reference_pred"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the three-leaf tree with (X, y, reference_pred). Returns objective loss.")
+       .def("predict",
+            [](Tree& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred) {
+                py::gil_scoped_release release;
+                return self.predict(X, reference_pred);
+            },
+            py::arg("X"),
+            py::arg("reference_pred"),
+            "Predict values for X, using reference_pred for defer leaves.")
+       .def("predict_with_reference",
+            [](Tree& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred) {
+                py::gil_scoped_release release;
+                return self.predict(X, reference_pred);
+            },
+            py::arg("X"),
+            py::arg("reference_pred"),
+            "Predict values for X, using reference_pred for defer leaves.");
+}
+
+void bind_three_leaf_methods(py::class_<Greedy>& cls) {
+    cls.def("fit",
+            [](Greedy& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit(X, y, reference_pred, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("reference_pred"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the three-leaf tree with (X, y, reference_pred). Returns objective loss.")
+       .def("fit_with_reference",
+            [](Greedy& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& y,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred,
+               const std::vector<int>& categorical_idx) {
+                py::gil_scoped_release release;
+                return self.fit(X, y, reference_pred, categorical_idx);
+            },
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("reference_pred"),
+            py::arg("categorical_idx") = std::vector<int>(),
+            "Fit the three-leaf tree with (X, y, reference_pred). Returns objective loss.")
+       .def("predict",
+            [](Greedy& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred) {
+                py::gil_scoped_release release;
+                return self.predict(X, reference_pred);
+            },
+            py::arg("X"),
+            py::arg("reference_pred"),
+            "Predict values for X, using reference_pred for defer leaves.")
+       .def("predict_with_reference",
+            [](Greedy& self,
+               const Eigen::Ref<const Eigen::MatrixXd>& X,
+               const Eigen::Ref<const Eigen::VectorXd>& reference_pred) {
+                py::gil_scoped_release release;
+                return self.predict(X, reference_pred);
+            },
+            py::arg("X"),
+            py::arg("reference_pred"),
+            "Predict values for X, using reference_pred for defer leaves.");
+}
+
+
 PYBIND11_MODULE(_core, m) {
     m.doc() = "clari_tree C++ core bindings";
 
     py::class_<Greedy> greedy(m, "Greedy");
     greedy.def(py::init<double, Depth, double, int, const std::string&, bool, int>(),
-               py::arg("kappa"),
-               py::arg("depth"),
-               py::arg("lambda_") = 0.0,
-               py::arg("n_thresholds") = 20,
-               py::arg("thresholds_strategy") = "quantile",
-               py::arg("verbose") = true,
-               py::arg("min_leaf_node_size") = 0)
-          .def(py::init<double, Depth, double, int, bool, int>(),
-               py::arg("kappa"),
-               py::arg("depth"),
-               py::arg("lambda_"),
-               py::arg("n_thresholds"),
-               py::arg("verbose"),
-               py::arg("min_leaf_node_size") = 0);
+            py::arg("kappa"),
+            py::arg("depth"),
+            py::arg("lambda_") = 0.0,
+            py::arg("n_thresholds") = 20,
+            py::arg("thresholds_strategy") = "quantile",
+            py::arg("verbose") = true,
+            py::arg("min_leaf_node_size") = 0)
+        .def(py::init<double, Depth, double, int, bool, int>(),
+            py::arg("kappa"),
+            py::arg("depth"),
+            py::arg("lambda_"),
+            py::arg("n_thresholds"),
+            py::arg("verbose"),
+            py::arg("min_leaf_node_size") = 0)
+
+        // three-leaf constructors.
+        .def(py::init<double, Depth, double, double, double, int, const std::string&, bool, int>(),
+            py::arg("kappa"),
+            py::arg("depth"),
+            py::arg("lambda_"),
+            py::arg("rho"),
+            py::arg("eta"),
+            py::arg("n_thresholds") = 20,
+            py::arg("thresholds_strategy") = "quantile",
+            py::arg("verbose") = true,
+            py::arg("min_leaf_node_size") = 0)
+        .def(py::init<double, Depth, double, double, double, int, bool, int>(),
+            py::arg("kappa"),
+            py::arg("depth"),
+            py::arg("lambda_"),
+            py::arg("rho"),
+            py::arg("eta"),
+            py::arg("n_thresholds"),
+            py::arg("verbose"),
+            py::arg("min_leaf_node_size") = 0);
+
     bind_tree_methods(greedy);
+    bind_three_leaf_methods(greedy);
 
     py::class_<CLARITree, Greedy> clari_tree(m, "CLARITree");
     clari_tree.def(py::init<double, Depth, double, int, const std::string&, bool, int>(),
-                   py::arg("kappa"),
-                   py::arg("depth"),
-                   py::arg("lambda_") = 0.0,
-                   py::arg("n_thresholds") = 20,
-                   py::arg("thresholds_strategy") = "quantile",
-                   py::arg("verbose") = true,
-                   py::arg("min_leaf_node_size") = 0)
-              .def(py::init<double, Depth, double, int, bool, int>(),
-                   py::arg("kappa"),
-                   py::arg("depth"),
-                   py::arg("lambda_"),
-                   py::arg("n_thresholds"),
-                   py::arg("verbose"),
-                   py::arg("min_leaf_node_size") = 0);
+                py::arg("kappa"),
+                py::arg("depth"),
+                py::arg("lambda_") = 0.0,
+                py::arg("n_thresholds") = 20,
+                py::arg("thresholds_strategy") = "quantile",
+                py::arg("verbose") = true,
+                py::arg("min_leaf_node_size") = 0)
+            .def(py::init<double, Depth, double, int, bool, int>(),
+                py::arg("kappa"),
+                py::arg("depth"),
+                py::arg("lambda_"),
+                py::arg("n_thresholds"),
+                py::arg("verbose"),
+                py::arg("min_leaf_node_size") = 0)
+
+            // three-leaf constructors.
+            .def(py::init<double, Depth, double, double, double, int, const std::string&, bool, int>(),
+                py::arg("kappa"),
+                py::arg("depth"),
+                py::arg("lambda_"),
+                py::arg("rho"),
+                py::arg("eta"),
+                py::arg("n_thresholds") = 20,
+                py::arg("thresholds_strategy") = "quantile",
+                py::arg("verbose") = true,
+                py::arg("min_leaf_node_size") = 0)
+            .def(py::init<double, Depth, double, double, double, int, bool, int>(),
+                py::arg("kappa"),
+                py::arg("depth"),
+                py::arg("lambda_"),
+                py::arg("rho"),
+                py::arg("eta"),
+                py::arg("n_thresholds"),
+                py::arg("verbose"),
+                py::arg("min_leaf_node_size") = 0);
+
+    bind_tree_methods(clari_tree);
+    bind_three_leaf_methods(clari_tree);
 
     py::class_<GreedyConst> greedy_const(m, "GreedyConst");
     greedy_const.def(py::init<int, double, int, const std::string&, bool, int>(),
@@ -122,16 +273,18 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<CLARITreeConst, GreedyConst> clari_tree_const(m, "CLARITreeConst");
     clari_tree_const.def(py::init<int, double, int, const std::string&, bool, int>(),
-                         py::arg("depth"),
-                         py::arg("lambda_") = 0.0,
-                         py::arg("n_thresholds") = 20,
-                         py::arg("thresholds_strategy") = "quantile",
-                         py::arg("verbose") = true,
-                         py::arg("min_leaf_node_size") = 1)
+                        py::arg("depth"),
+                        py::arg("lambda_") = 0.0,
+                        py::arg("n_thresholds") = 20,
+                        py::arg("thresholds_strategy") = "quantile",
+                        py::arg("verbose") = true,
+                        py::arg("min_leaf_node_size") = 1)
                     .def(py::init<int, double, int, bool, int>(),
-                         py::arg("depth"),
-                         py::arg("lambda_"),
-                         py::arg("n_thresholds"),
-                         py::arg("verbose"),
-                         py::arg("min_leaf_node_size") = 1);
+                        py::arg("depth"),
+                        py::arg("lambda_"),
+                        py::arg("n_thresholds"),
+                        py::arg("verbose"),
+                        py::arg("min_leaf_node_size") = 1);
+
+    bind_tree_methods(clari_tree_const);
 }

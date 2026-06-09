@@ -10,6 +10,7 @@
 #include <functional>
 #include <sstream>
 #include <cmath>
+#include <tuple>
 
 #include <Eigen/Dense>
 
@@ -184,7 +185,8 @@ namespace {
 // constructor
 Node::Node()
     : left(nullptr), right(nullptr), is_leaf(true), n_instances(0), obj(0), threshold(0),
-      feature_idx(0), coefficients(Eigen::VectorXd::Zero(1)) {}
+      feature_idx(0), coefficients(Eigen::VectorXd::Zero(1)),
+      leaf_type(LeafType::LINEAR), constant_prediction(0.0) {}
 
 // destructor
 Node::~Node()
@@ -211,6 +213,8 @@ Node &Node::operator=(const Node &other)
         threshold = other.threshold;
         feature_idx = other.feature_idx;
         coefficients = other.coefficients;
+        leaf_type = other.leaf_type;
+        constant_prediction = other.constant_prediction;
     }
     return *this;
 }
@@ -226,6 +230,8 @@ Node::Node(const Node &other)
     threshold = other.threshold;
     feature_idx = other.feature_idx;
     coefficients = other.coefficients;
+    leaf_type = other.leaf_type;
+    constant_prediction = other.constant_prediction;
 }
 
 // print the tree structure
@@ -235,10 +241,24 @@ std::string Node::print_tree(int indentation, const std::vector<int>& continuous
     std::ostringstream oss;
     oss.setf(std::ios::fixed);
     oss << std::setprecision(6);
+
     if (is_leaf)
     {
-        oss << indent << "Ridge leaf; obj = "
-            << obj << "\n";
+        if (leaf_type == LeafType::CONSTANT)
+        {
+            oss << indent << "Constant leaf; obj = " << obj << "\n";
+            oss << indent << "Fit: " << constant_prediction << "\n";
+            return oss.str();
+        }
+
+        if (leaf_type == LeafType::DEFER)
+        {
+            oss << indent << "Defer leaf; obj = " << obj << "\n";
+            oss << indent << "Fit: reference prediction\n";
+            return oss.str();
+        }
+
+        oss << indent << "Linear ridge leaf; obj = " << obj << "\n";
         if (!continuous_idx.empty() && coefficients.size() > 0)
         {
             oss << indent << "Continuous features: ";
@@ -248,6 +268,7 @@ std::string Node::print_tree(int indentation, const std::vector<int>& continuous
                 oss << "x_" << continuous_idx[k];
             }
             oss << "\n";
+
             oss << indent << "Fit: " << coefficients(0);
             for (std::size_t k = 0; k < continuous_idx.size(); ++k)
             {
@@ -256,6 +277,7 @@ std::string Node::print_tree(int indentation, const std::vector<int>& continuous
                 {
                     break;
                 }
+
                 double bj = coefficients(coef_idx);
                 if (bj >= 0.0)
                 {
@@ -269,19 +291,18 @@ std::string Node::print_tree(int indentation, const std::vector<int>& continuous
             }
             oss << "\n";
         }
+        else if (coefficients.size() > 0)
+        {
+            oss << indent << "Fit: " << coefficients(0) << "\n";
+        }
         else
         {
-            if (coefficients.size() > 0)
-            {
-                oss << indent << "Fit: " << coefficients(0) << "\n";
-            }
-            else
-            {
-                oss << indent << "No coefficients available.\n";
-            }
+            oss << indent << "No coefficients available.\n";
         }
+
         return oss.str();
     }
+    
     const std::size_t left_instances = left ? left->n_instances : 0;
     oss << indent << "If feature " << feature_idx
         << " <= " << threshold
@@ -306,12 +327,42 @@ Greedy::Greedy(double kappa, Depth depth, double lambda, int n_thresholds, bool 
 
 Greedy::Greedy(double kappa, Depth depth, double lambda, int n_thresholds, const std::string& thresholds_strategy, bool verbose, int min_leaf_node_size)
     : kappa(kappa),
+      scaled_kappa(0.0),
       verbose(verbose),
       depth(depth),
+      n(0),
+      m(0),
       lambda(lambda),
+      scaled_lambda(0.0),
+      rho(0.0),
+      eta(std::numeric_limits<double>::infinity()),
       n_thresholds(n_thresholds),
       thresholds_strategy(thresholds_strategy),
       min_leaf_node_size(min_leaf_node_size),
+      has_reference_pred_(false),
+      root(new Node()) {}
+
+Greedy::Greedy(double kappa, Depth depth, double lambda, double rho, double eta,
+               int n_thresholds, bool verbose, int min_leaf_node_size)
+    : Greedy(kappa, depth, lambda, rho, eta, n_thresholds, "quantile", verbose, min_leaf_node_size) {}
+
+Greedy::Greedy(double kappa, Depth depth, double lambda, double rho, double eta,
+               int n_thresholds, const std::string& thresholds_strategy,
+               bool verbose, int min_leaf_node_size)
+    : kappa(kappa),
+      scaled_kappa(0.0),
+      verbose(verbose),
+      depth(depth),
+      n(0),
+      m(0),
+      lambda(lambda),
+      scaled_lambda(0.0),
+      rho(rho),
+      eta(eta),
+      n_thresholds(n_thresholds),
+      thresholds_strategy(thresholds_strategy),
+      min_leaf_node_size(min_leaf_node_size),
+      has_reference_pred_(false),
       root(new Node()) {}
 
 // destructor
@@ -337,6 +388,8 @@ Greedy &Greedy::operator=(const Greedy &other)
         depth = other.depth;
         lambda = other.lambda;
         scaled_lambda = other.scaled_lambda;
+        rho = other.rho;
+        eta = other.eta;
         n = other.n;
         m = other.m;
         min_leaf_node_size = other.min_leaf_node_size;
@@ -352,6 +405,9 @@ Greedy &Greedy::operator=(const Greedy &other)
         x_mean_ = other.x_mean_;
         x_std_ = other.x_std_;
         y_mean_ = other.y_mean_;
+        reference_pred_centered_ = other.reference_pred_centered_;
+        defer_resid_sq_ = other.defer_resid_sq_;
+        has_reference_pred_ = other.has_reference_pred_;
         traversed_thresholds_ = other.traversed_thresholds_;
         threshold_pool_ = other.threshold_pool_;
         resolved_min_leaf_node_size_ = other.resolved_min_leaf_node_size_;
@@ -364,6 +420,7 @@ Greedy::Greedy(const Greedy &other)
     : X(other.X), y(other.y), kappa(other.kappa), scaled_kappa(other.scaled_kappa),
       verbose(other.verbose), depth(other.depth), n(other.n), m(other.m),
       lambda(other.lambda), scaled_lambda(other.scaled_lambda),
+      rho(other.rho), eta(other.eta),
       n_thresholds(other.n_thresholds), thresholds_strategy(other.thresholds_strategy),
       min_leaf_node_size(other.min_leaf_node_size),
       continuous_idx_(other.continuous_idx_),
@@ -373,6 +430,9 @@ Greedy::Greedy(const Greedy &other)
       p_reg_(other.p_reg_),
       p_split_(other.p_split_),
       x_mean_(other.x_mean_), x_std_(other.x_std_), y_mean_(other.y_mean_),
+      reference_pred_centered_(other.reference_pred_centered_),
+      defer_resid_sq_(other.defer_resid_sq_),
+      has_reference_pred_(other.has_reference_pred_),
       traversed_thresholds_(other.traversed_thresholds_),
       threshold_pool_(other.threshold_pool_),
       resolved_min_leaf_node_size_(other.resolved_min_leaf_node_size_)
@@ -431,34 +491,67 @@ void Greedy::build_threshold_pool(const std::vector<std::vector<unsigned long in
 
 double Greedy::fit(MatrixXd X, VectorXd y, const std::vector<int>& categorical_idx)
 {
+    const double old_eta = this->eta;
+    this->eta = std::numeric_limits<double>::infinity();
+
+    Eigen::VectorXd dummy_ref = y;
+    double out = fit(X, y, dummy_ref, categorical_idx);
+
+    this->eta = old_eta;
+    this->has_reference_pred_ = false;
+
+    return out;
+}
+
+double Greedy::fit(MatrixXd X,
+                   VectorXd y,
+                   VectorXd reference_pred,
+                   const std::vector<int>& categorical_idx)
+{
+    if (reference_pred.size() != y.size()) {
+        throw std::runtime_error("fit: reference_pred must have the same length as y.");
+    }
+
     ensure_intercept_inplace(X);
     this->X = X;
     this->n = X.rows();
     this->m = X.cols();
+
+    if (y.size() != this->n) {
+        throw std::runtime_error("fit: y must have the same number of rows as X.");
+    }
+
+    if (reference_pred.size() != this->n) {
+        throw std::runtime_error("fit: reference_pred must have the same number of rows as X.");
+    }
+
+    this->has_reference_pred_ = true;
+
     reset_traversed_thresholds();
+
     this->categorical_idx_.clear();
     this->categorical_idx_.reserve(categorical_idx.size());
     for (int j_raw : categorical_idx) {
-        this->categorical_idx_.push_back(j_raw + 1);  // shift for intercept
+        this->categorical_idx_.push_back(j_raw + 1);
     }
-    // detect feature types (based on original X)
+
     detect_feature_types();
     resolve_min_leaf_node_size();
-    // scale by n
-    this->scaled_lambda = this->n * this->lambda;
-    // scale by TSS
+
     double mean_y = y.mean();
     double tss = (y.array() - mean_y).matrix().squaredNorm();
     this->scaled_lambda = this->lambda * tss;
     this->scaled_kappa = this->n * this->kappa;
-    // Standardize continuous X and center y if needed
+
     const double mean_tol = 1e-6;
     const double std_tol = 1e-3;
     const bool x_is_standardized = is_standardized_cols(this->X, continuous_idx_, mean_tol, std_tol);
     const bool y_is_centered = std::abs(mean_y) <= mean_tol;
+
     const int cont_n = static_cast<int>(continuous_idx_.size());
     x_mean_.resize(cont_n);
     x_std_.resize(cont_n);
+
     for (int k = 0; k < cont_n; ++k) {
         const int j = continuous_idx_[k];
         const Eigen::VectorXd col = this->X.col(j);
@@ -468,6 +561,7 @@ double Greedy::fit(MatrixXd X, VectorXd y, const std::vector<int>& categorical_i
         if (sd < 1e-12) {
             sd = 1.0;
         }
+
         if (x_is_standardized) {
             x_mean_(k) = 0.0;
             x_std_(k) = 1.0;
@@ -476,6 +570,7 @@ double Greedy::fit(MatrixXd X, VectorXd y, const std::vector<int>& categorical_i
             x_std_(k) = sd;
         }
     }
+
     if (y_is_centered) {
         y_mean_ = 0.0;
         this->y = y;
@@ -483,79 +578,129 @@ double Greedy::fit(MatrixXd X, VectorXd y, const std::vector<int>& categorical_i
         y_mean_ = mean_y;
         this->y = y.array() - y_mean_;
     }
-    // Build X_reg_ = [1 | standardized continuous columns]
+
+    // center the reference predictions using the same y_mean_.
+    // then (centered_y - centered_ref)^2 equals (original_y - original_ref)^2.
+    this->reference_pred_centered_ = reference_pred.array() - y_mean_;
+    this->defer_resid_sq_ = (this->y - this->reference_pred_centered_).array().square().matrix();
+
     p_reg_ = 1 + cont_n;
     X_reg_.resize(this->n, p_reg_);
     X_reg_.col(0) = Eigen::VectorXd::Ones(this->n);
+
     for (int k = 0; k < cont_n; ++k) {
         const int j = continuous_idx_[k];
         X_reg_.col(1 + k) = (this->X.col(j).array() - x_mean_(k)) / x_std_(k);
     }
+
     if (p_reg_ <= 1) {
         throw std::runtime_error("Provide continuous columns (no non-binary, non-categorical numeric features found).");
     }
 
-    // Root Cholesky built on X_reg_, not on full X
     MatrixXd gram = X_reg_.transpose() * X_reg_ + scaled_kappa * MatrixXd::Identity(p_reg_, p_reg_);
     gram(0,0) -= scaled_kappa - 1e-12;
+
     LLT<MatrixXd> lltOfA(gram);
     VectorXd b = X_reg_.transpose() * this->y;
+
+    double y_sum = this->y.sum();
     double y_sum_sq = this->y.squaredNorm();
-    double parent_loss = Greedy::loss(lltOfA, b, y_sum_sq);
+    double defer_sse = this->defer_resid_sq_.sum();
 
-    delete this->root; // delete old root if exists
+    delete this->root;
     this->root = new Node();
-    this->root->obj = parent_loss + this->scaled_lambda;
+    this->root->obj = best_three_leaf_objective(
+        static_cast<int>(this->n),
+        y_sum,
+        y_sum_sq,
+        lltOfA,
+        b,
+        defer_sse
+    );
 
-    // get sorted feature indices
-    // that is, for each feature, we want a row vector of indices sorted by feature value
     vector<vector<unsigned long int>> sorted_indices(this->m, vector<unsigned long int>(this->n));
     for (unsigned long int feature = 1; feature < this->m; feature++)
     {
         vector<unsigned long int> indices(this->n);
-        iota(indices.begin(), indices.end(), 0); // fill with 0, 1, ..., n-1
-        sort(indices.begin(), indices.end(), [&](unsigned long int a, unsigned long int b)
-             { return X(a, feature) < X(b, feature); });
+        iota(indices.begin(), indices.end(), 0);
+        sort(indices.begin(), indices.end(), [&](unsigned long int a, unsigned long int bidx)
+             { return this->X(a, feature) < this->X(bidx, feature); });
         sorted_indices[feature] = indices;
     }
-    // Build fit-time global threshold pool (shared across all nodes).
+
     build_threshold_pool(sorted_indices);
 
-    // learn partitioning structure and resulting loss
     double objective = recursive_fit(sorted_indices, lltOfA, b, y_sum_sq, this->root, this->depth);
-    // Now learn the coefficient vectors for each of the nodes.
-    fit_coefficients(this->root, this->X, this->y);
+
+    std::vector<int> all_rows(this->n);
+    std::iota(all_rows.begin(), all_rows.end(), 0);
+    fit_coefficients(this->root, this->X, this->y, all_rows);
 
     return objective;
 }
 
-void Greedy::fit_coefficients(Node *node, MatrixXd X, VectorXd y)
+void Greedy::fit_coefficients(Node *node,
+                              MatrixXd X,
+                              VectorXd y,
+                              const std::vector<int>& original_rows)
 {
-    /*
-    Fit the coefficients for the linear regression at this node. Only called after the tree structure is fully learned.
-    */
     if (node->is_leaf)
     {
-        // Build local X_reg from provided rows
+        const int nloc = static_cast<int>(y.size());
+
+        if (nloc <= 0) {
+            node->leaf_type = LeafType::CONSTANT;
+            node->constant_prediction = y_mean_;
+            node->coefficients = Eigen::VectorXd::Constant(1, y_mean_);
+            return;
+        }
+
         MatrixXd Xloc(X.rows(), p_reg_);
         Xloc.col(0).setOnes();
+
         for (int k = 0; k < (int)continuous_idx_.size(); ++k) {
             Xloc.col(1 + k) = (X.col(continuous_idx_[k]).array() - x_mean_(k)) / x_std_(k);
         }
 
-        // fit ridge regression
         MatrixXd gram = Xloc.transpose() * Xloc + scaled_kappa * MatrixXd::Identity(Xloc.cols(), Xloc.cols());
         gram(0, 0) -= scaled_kappa - 1e-12;
-        // node->coefficients = gram.inverse() * X.transpose() * y;
+
         LLT<MatrixXd> llt(gram);
-        VectorXd beta_std = llt.solve(Xloc.transpose() * y);
-        // check that coefficients lead to same sum sq error + lambda penalty as currently recorded in node->obj
-        VectorXd yhat = Xloc * beta_std;
-        double reg = 1e-12 * beta_std(0) * beta_std(0) + this->scaled_kappa * beta_std.tail(beta_std.size() - 1).squaredNorm(); // delete the penalty of intercept
-        
-        // Convert coefficients back to original scale for prediction/printing
+        VectorXd b = Xloc.transpose() * y;
+
+        double y_sum = y.sum();
+        double y_sum_sq = y.squaredNorm();
+
+        double defer_sse = std::numeric_limits<double>::infinity();
+        if (has_reference_pred_) {
+            defer_sse = 0.0;
+            for (int original_row : original_rows) {
+                defer_sse += defer_resid_sq_(original_row);
+            }
+        }
+
+        node->leaf_type = best_leaf_type(nloc, y_sum, y_sum_sq, llt, b, defer_sse);
+        node->obj = best_three_leaf_objective(nloc, y_sum, y_sum_sq, llt, b, defer_sse);
+
+        if (node->leaf_type == LeafType::CONSTANT)
+        {
+            node->constant_prediction = y_sum / static_cast<double>(nloc) + y_mean_;
+            node->coefficients = Eigen::VectorXd::Constant(1, node->constant_prediction);
+            return;
+        }
+
+        if (node->leaf_type == LeafType::DEFER)
+        {
+            node->constant_prediction = 0.0;
+            node->coefficients = Eigen::VectorXd::Zero(0);
+            return;
+        }
+
+        VectorXd beta_std = llt.solve(b);
+
         VectorXd beta_orig = beta_std;
         double intercept = y_mean_ + beta_std(0);
+
         for (int k = 0; k < (int)continuous_idx_.size(); ++k) {
             const double mu = x_mean_(k);
             const double sd = x_std_(k);
@@ -563,42 +708,40 @@ void Greedy::fit_coefficients(Node *node, MatrixXd X, VectorXd y)
             intercept -= bj * mu / sd;
             beta_orig(1 + k) = bj / sd;
         }
+
         beta_orig(0) = intercept;
         node->coefficients = beta_orig;
+        return;
+    }
 
-        // Debug check
-        // double new_loss = (y - yhat).squaredNorm() + reg;
-        // // double new_loss = (y - yhat).squaredNorm() + this->scaled_kappa * node->coefficients.squaredNorm();
-        // double new_obj = new_loss + this->scaled_lambda;
-        // double tol = 1e-10 * std::max(1.0, std::abs(node->obj));
-        // if (abs(new_obj - node->obj) > tol)
-        // {
-        //     double diff = std::abs(new_obj - node->obj);
-        //     cerr << "Warning: Fit coefficients in at least one leaf do not match recorded loss."
-        //          << "Diff = " << diff << endl;
-        // }
-    }
-    else
+    vector<unsigned long int> left_indices;
+    vector<unsigned long int> right_indices;
+    std::vector<int> left_rows_original;
+    std::vector<int> right_rows_original;
+
+    for (unsigned long int i = 0; i < X.rows(); i++)
     {
-        // Match the split convention used during search and prediction.
-        vector<unsigned long int> left_indices;
-        vector<unsigned long int> right_indices;
-        for (unsigned long int i = 0; i < X.rows(); i++)
+        if (X(i, node->feature_idx) <= node->threshold)
         {
-            if (X(i, node->feature_idx) <= node->threshold)
-            {
-                left_indices.push_back(i);
-            }
-            else
-            {
-                right_indices.push_back(i);
-            }
+            left_indices.push_back(i);
+            left_rows_original.push_back(original_rows[i]);
         }
-        // fit coefficients for children
-        fit_coefficients(node->left, X(left_indices, Eigen::all), y(left_indices));
-        fit_coefficients(node->right, X(right_indices, Eigen::all), y(right_indices));
+        else
+        {
+            right_indices.push_back(i);
+            right_rows_original.push_back(original_rows[i]);
+        }
     }
-    return;
+
+    fit_coefficients(node->left,
+                     X(left_indices, Eigen::all),
+                     y(left_indices),
+                     left_rows_original);
+
+    fit_coefficients(node->right,
+                     X(right_indices, Eigen::all),
+                     y(right_indices),
+                     right_rows_original);
 }
 
 double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, LLT<MatrixXd>& llt, VectorXd& b, double y_sum_sq, Node *node, Depth depth_remaining)
@@ -609,6 +752,19 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
     Assumes current node has loss value filled in with its loss if it were a leaf.
     */
     node->n_instances = node_instance_count_from_sorted_indices(sorted_indices, this->m);
+
+    const double node_y_sum = sum_y_from_sorted_indices(sorted_indices);
+    const double node_defer_sse = sum_defer_sse_from_sorted_indices(sorted_indices);
+
+    node->obj = best_three_leaf_objective(
+        static_cast<int>(node->n_instances),
+        node_y_sum,
+        y_sum_sq,
+        llt,
+        b,
+        node_defer_sse
+    );
+
     if (depth_remaining == 0 ||
         node->obj <= 2 * this->scaled_lambda ||
         node->n_instances < 2 * resolved_min_leaf_node_size_)
@@ -643,13 +799,22 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             left_rows.reserve(sorted_indices[feature].size());
             right_rows.reserve(sorted_indices[feature].size());
 
-            // Split by 0/1 using only current node's samples
+            double y_sum_left = 0.0;
+            double y_sum_right = 0.0;
+            double defer_sse_left = 0.0;
+            double defer_sse_right = 0.0;
+
             for (unsigned long int row : sorted_indices[feature])
             {
-                if (this->X((int)row, feature) <= 0.5)
+                if (this->X((int)row, feature) <= 0.5) {
                     left_rows.push_back((int)row);
-                else
+                    y_sum_left += this->y(row);
+                    if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
+                } else {
                     right_rows.push_back((int)row);
+                    y_sum_right += this->y(row);
+                    if (has_reference_pred_) defer_sse_right += this->defer_resid_sq_(row);
+                }
             }
             if (!children_respect_min_leaf_size(left_rows.size(), right_rows.size()))
                 continue; // not splittable
@@ -658,8 +823,23 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             auto [lltL, bL, yssL] = recompute_stats_from_rows(left_rows);
             auto [lltR, bR, yssR] = recompute_stats_from_rows(right_rows);
 
-            double left_obj = loss(lltL, bL, yssL) + this->scaled_lambda;
-            double right_obj = loss(lltR, bR, yssR) + this->scaled_lambda;
+           double left_obj = best_three_leaf_objective(
+                static_cast<int>(left_rows.size()),
+                y_sum_left,
+                yssL,
+                lltL,
+                bL,
+                defer_sse_left
+            );
+
+            double right_obj = best_three_leaf_objective(
+                static_cast<int>(right_rows.size()),
+                y_sum_right,
+                yssR,
+                lltR,
+                bR,
+                defer_sse_right
+            );
 
             if (left_obj + right_obj < min_obj)
             {
@@ -692,11 +872,18 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
         gram_left(0, 0) = 1e-12;
         VectorXd b_left = VectorXd::Zero(p_reg_);
         LLT<MatrixXd> llt_left(gram_left);
-        double y_sum_sq_left = 0; // sum of squares of y values in left child
+        double y_sum_sq_left = 0.0;
+        double y_sum_left = 0.0;
+        double defer_sse_left = 0.0;
+
         vector<int> left_indices = {};
-        VectorXd b_right = b;             // copy parent b
-        LLT<MatrixXd> llt_right = llt;    // use parent llt
-        double y_sum_sq_right = y_sum_sq; // copy parent y sum squared
+
+        VectorXd b_right = b;
+        LLT<MatrixXd> llt_right = llt;
+
+        double y_sum_sq_right = y_sum_sq;
+        double y_sum_right = node_y_sum;
+        double defer_sse_right = has_reference_pred_ ? node_defer_sse : 0.0;
         std::size_t pool_idx = 0;
         for (unsigned long int feature_idx = 0; feature_idx < sorted_indices[feature].size(); feature_idx++)
         {
@@ -704,11 +891,15 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             b_left += reg_row(row).transpose() * this->y(row);
             llt_left.rankUpdate(reg_row(row), 1);
             y_sum_sq_left += this->y(row) * this->y(row);
+            y_sum_left += this->y(row);
+            if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
             left_indices.push_back(row);
 
             b_right -= reg_row(row).transpose() * this->y(row);
             llt_right.rankUpdate(reg_row(row), -1);
             y_sum_sq_right -= this->y(row) * this->y(row);
+            y_sum_right -= this->y(row);
+            if (has_reference_pred_) defer_sse_right -= this->defer_resid_sq_(row);
             if (feature_idx == sorted_indices[feature].size() - 1)
             {
                 // if this is the last feature index, we can't split further
@@ -738,8 +929,23 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
 
                 // double left_obj = loss(llt_left.matrixL(), b_left, y_sum_sq_left) + this->scaled_lambda;
                 // double right_obj = loss(llt_right.matrixL(), b_right, y_sum_sq_right) + this->scaled_lambda;
-                double left_obj = loss(llt_left, b_left, y_sum_sq_left) + this->scaled_lambda;
-                double right_obj = loss(llt_right, b_right, y_sum_sq_right) + this->scaled_lambda;
+                double left_obj = best_three_leaf_objective(
+                    static_cast<int>(left_count),
+                    y_sum_left,
+                    y_sum_sq_left,
+                    llt_left,
+                    b_left,
+                    defer_sse_left
+                );
+
+                double right_obj = best_three_leaf_objective(
+                    static_cast<int>(right_count),
+                    y_sum_right,
+                    y_sum_sq_right,
+                    llt_right,
+                    b_right,
+                    defer_sse_right
+                );
                 if (left_obj + right_obj < min_obj)
                 {
                     split_flag = true;
@@ -853,10 +1059,101 @@ Parameters:
 */
 double Greedy::loss(const LLT<MatrixXd>& llt,
                     const VectorXd& b,
-                    double y_sum_sq)
+                    double y_sum_sq) const
 {
     VectorXd z = llt.matrixL().solve(b);
     return y_sum_sq - z.squaredNorm();
+}
+
+double Greedy::constant_loss(int n, double y_sum, double y_sum_sq) const
+{
+    if (n <= 0) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return y_sum_sq - y_sum * y_sum / static_cast<double>(n);
+}
+
+double Greedy::best_three_leaf_objective(int n,
+                                         double y_sum,
+                                         double y_sum_sq,
+                                         const LLT<MatrixXd>& llt,
+                                         const VectorXd& b,
+                                         double defer_sse) const
+{
+    if (n <= 0) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double const_obj = constant_loss(n, y_sum, y_sum_sq);
+    const double linear_obj = loss(llt, b, y_sum_sq) + rho * static_cast<double>(n);
+
+    double defer_obj = std::numeric_limits<double>::infinity();
+    if (has_reference_pred_) {
+        defer_obj = defer_sse + eta * static_cast<double>(n);
+    }
+
+    return this->scaled_lambda + std::min({const_obj, linear_obj, defer_obj});
+}
+
+LeafType Greedy::best_leaf_type(int n,
+                                double y_sum,
+                                double y_sum_sq,
+                                const LLT<MatrixXd>& llt,
+                                const VectorXd& b,
+                                double defer_sse) const
+{
+    if (n <= 0) {
+        return LeafType::CONSTANT;
+    }
+
+    const double const_obj = constant_loss(n, y_sum, y_sum_sq);
+    const double linear_obj = loss(llt, b, y_sum_sq) + rho * static_cast<double>(n);
+
+    double defer_obj = std::numeric_limits<double>::infinity();
+    if (has_reference_pred_) {
+        defer_obj = defer_sse + eta * static_cast<double>(n);
+    }
+
+    if (const_obj <= linear_obj && const_obj <= defer_obj) {
+        return LeafType::CONSTANT;
+    }
+    if (linear_obj <= defer_obj) {
+        return LeafType::LINEAR;
+    }
+    return LeafType::DEFER;
+}
+
+double Greedy::sum_y_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
+{
+    for (unsigned long int feature = 1; feature < this->m; ++feature) {
+        if (!sorted_indices[feature].empty()) {
+            double out = 0.0;
+            for (unsigned long int row : sorted_indices[feature]) {
+                out += this->y(row);
+            }
+            return out;
+        }
+    }
+    return 0.0;
+}
+
+double Greedy::sum_defer_sse_from_sorted_indices(const std::vector<std::vector<unsigned long int>>& sorted_indices) const
+{
+    if (!has_reference_pred_) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    for (unsigned long int feature = 1; feature < this->m; ++feature) {
+        if (!sorted_indices[feature].empty()) {
+            double out = 0.0;
+            for (unsigned long int row : sorted_indices[feature]) {
+                out += this->defer_resid_sq_(row);
+            }
+            return out;
+        }
+    }
+
+    return 0.0;
 }
 
 
@@ -878,6 +1175,73 @@ VectorXd Greedy::predict(MatrixXd X)
     return predictions;
 }
 
+VectorXd Greedy::predict(MatrixXd X, VectorXd reference_pred)
+{
+    ensure_intercept_inplace(X);
+
+    if (X.cols() != this->m) {
+        throw runtime_error("predict: X has unexpected number of columns (intercept is column 0).");
+    }
+
+    if (reference_pred.size() != X.rows()) {
+        throw runtime_error("predict: reference_pred must have one entry per row of X.");
+    }
+
+    VectorXd predictions(X.rows());
+    for (int i = 0; i < X.rows(); i++)
+    {
+        predictions(i) = predict_row(X.row(i), reference_pred(i));
+    }
+
+    return predictions;
+}
+
+double Greedy::predict_row(VectorXd x, double reference_value)
+{
+    if (x.size() == this->m - 1) {
+        VectorXd x1(this->m);
+        x1(0) = 1.0;
+        x1.tail(this->m - 1) = x;
+        x.swap(x1);
+    } else if (x.size() != this->m) {
+        throw runtime_error("predict_row: x has unexpected length (intercept is column 0).");
+    }
+
+    Node *current = this->root;
+
+    while (current != nullptr)
+    {
+        if (current->is_leaf)
+        {
+            if (current->leaf_type == LeafType::CONSTANT) {
+                return current->constant_prediction;
+            }
+
+            if (current->leaf_type == LeafType::DEFER) {
+                return reference_value;
+            }
+
+            VectorXd z(p_reg_);
+            z(0) = 1.0;
+            for (int k = 0; k < (int)continuous_idx_.size(); ++k) {
+                z(1 + k) = x(continuous_idx_[k]);
+            }
+            return current->coefficients.dot(z);
+        }
+
+        if (x(current->feature_idx) <= current->threshold)
+        {
+            current = current->left;
+        }
+        else
+        {
+            current = current->right;
+        }
+    }
+
+    throw runtime_error("Invalid tree structure");
+}
+
 double Greedy::predict_row(VectorXd x)
 {
     if (x.size() == this->m - 1) {
@@ -894,8 +1258,14 @@ double Greedy::predict_row(VectorXd x)
     {
         if (current->is_leaf)
         {
-            // return current->coefficients.transpose() * x;
-            // assemble z = [1, x_cont]^T
+            if (current->leaf_type == LeafType::CONSTANT) {
+                return current->constant_prediction;
+            }
+
+            if (current->leaf_type == LeafType::DEFER) {
+                throw std::runtime_error("predict_row: reached a defer leaf; call predict(X, reference_pred) instead.");
+            }
+
             VectorXd z(p_reg_);
             z(0) = 1.0;
             for (int k = 0; k < (int)continuous_idx_.size(); ++k) {
@@ -1062,6 +1432,15 @@ CLARITree::CLARITree(double kappa, Depth depth, double lambda, int n_thresholds,
 CLARITree::CLARITree(double kappa, Depth depth, double lambda, int n_thresholds, const std::string& thresholds_strategy, bool verbose, int min_leaf_node_size)
     : Greedy(kappa, depth, lambda, n_thresholds, thresholds_strategy, verbose, min_leaf_node_size) {}
 
+CLARITree::CLARITree(double kappa, Depth depth, double lambda, double rho, double eta,
+                     int n_thresholds, bool verbose, int min_leaf_node_size)
+    : Greedy(kappa, depth, lambda, rho, eta, n_thresholds, verbose, min_leaf_node_size) {}
+
+CLARITree::CLARITree(double kappa, Depth depth, double lambda, double rho, double eta,
+                     int n_thresholds, const std::string& thresholds_strategy,
+                     bool verbose, int min_leaf_node_size)
+    : Greedy(kappa, depth, lambda, rho, eta, n_thresholds, thresholds_strategy, verbose, min_leaf_node_size) {}
+
 double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, LLT<MatrixXd>& llt, VectorXd& b, double y_sum_sq, Node *node, Depth depth_remaining)
 {
     /*
@@ -1070,12 +1449,25 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
     Then, replace those greedy calls with another CLARITree call
     */
     node->n_instances = node_instance_count_from_sorted_indices(sorted_indices, this->m);
+
+    const double node_y_sum = sum_y_from_sorted_indices(sorted_indices);
+    const double node_defer_sse = sum_defer_sse_from_sorted_indices(sorted_indices);
+
+    node->obj = best_three_leaf_objective(
+        static_cast<int>(node->n_instances),
+        node_y_sum,
+        y_sum_sq,
+        llt,
+        b,
+        node_defer_sse
+    );
+
     if (depth_remaining == 0 ||
         node->obj <= 2 * this->scaled_lambda ||
         node->n_instances < 2 * resolved_min_leaf_node_size_)
     {
         node->is_leaf = true;
-        return node->obj; // return the objective at this node
+        return node->obj;
     }
 
     // find best split
@@ -1104,13 +1496,23 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
             left_rows.reserve(sorted_indices[feature].size());
             right_rows.reserve(sorted_indices[feature].size());
 
+            double y_sum_left = 0.0;
+            double y_sum_right = 0.0;
+            double defer_sse_left = 0.0;
+            double defer_sse_right = 0.0;
+
             // Split by 0/1 using only current node's samples
             for (unsigned long int row : sorted_indices[feature])
             {
-                if (this->X((int)row, feature) <= 0.5)
+                if (this->X((int)row, feature) <= 0.5) {
                     left_rows.push_back((int)row);
-                else
+                    y_sum_left += this->y(row);
+                    if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
+                } else {
                     right_rows.push_back((int)row);
+                    y_sum_right += this->y(row);
+                    if (has_reference_pred_) defer_sse_right += this->defer_resid_sq_(row);
+                }
             }
             if (!children_respect_min_leaf_size(left_rows.size(), right_rows.size()))
                 continue; // not splittable
@@ -1119,8 +1521,23 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
             auto [lltL, bL, yssL] = recompute_stats_from_rows(left_rows);
             auto [lltR, bR, yssR] = recompute_stats_from_rows(right_rows);
 
-            double left_obj = loss(lltL, bL, yssL) + this->scaled_lambda;
-            double right_obj = loss(lltR, bR, yssR) + this->scaled_lambda;
+            double left_obj = best_three_leaf_objective(
+                static_cast<int>(left_rows.size()),
+                y_sum_left,
+                yssL,
+                lltL,
+                bL,
+                defer_sse_left
+            );
+
+            double right_obj = best_three_leaf_objective(
+                static_cast<int>(right_rows.size()),
+                y_sum_right,
+                yssR,
+                lltR,
+                bR,
+                defer_sse_right
+            );
 
             if (depth_remaining == 1)
             {
@@ -1209,11 +1626,18 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
         gram_left(0, 0) = 1e-12;
         VectorXd b_left = VectorXd::Zero(p_reg_);
         LLT<MatrixXd> llt_left(gram_left);
-        double y_sum_sq_left = 0; // sum of squares of y values in left child
+        double y_sum_sq_left = 0.0;
+        double y_sum_left = 0.0;
+        double defer_sse_left = 0.0;
+
         vector<unsigned long int> left_indices = {};
-        VectorXd b_right = b;             // copy parent b
-        LLT<MatrixXd> llt_right = llt;    // use parent llt
-        double y_sum_sq_right = y_sum_sq; // copy parent y sum squared
+
+        VectorXd b_right = b;
+        LLT<MatrixXd> llt_right = llt;
+
+        double y_sum_sq_right = y_sum_sq;
+        double y_sum_right = node_y_sum;
+        double defer_sse_right = has_reference_pred_ ? node_defer_sse : 0.0;
         std::size_t pool_idx = 0;
         for (unsigned long int feature_idx = 0; feature_idx < sorted_indices[feature].size(); feature_idx++)
         {
@@ -1221,11 +1645,15 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
             b_left += reg_row(row).transpose() * this->y(row);
             llt_left.rankUpdate(reg_row(row), 1);
             y_sum_sq_left += this->y(row) * this->y(row);
+            y_sum_left += this->y(row);
+            if (has_reference_pred_) defer_sse_left += this->defer_resid_sq_(row);
             left_indices.push_back(row);
 
             b_right -= reg_row(row).transpose() * this->y(row);
             llt_right.rankUpdate(reg_row(row), -1);
             y_sum_sq_right -= this->y(row) * this->y(row);
+            y_sum_right -= this->y(row);
+            if (has_reference_pred_) defer_sse_right -= this->defer_resid_sq_(row);
             if (feature_idx == sorted_indices[feature].size() - 1)
             {
                 // if this is the last feature index, we can't split further
@@ -1253,8 +1681,23 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
                 const double candidate_threshold = feature_pool[eval_idx];
                 record_traversed_threshold(feature, candidate_threshold);
                 // loss estimate based on greedy completion
-                double left_obj = loss(llt_left, b_left, y_sum_sq_left) + this->scaled_lambda;
-                double right_obj = loss(llt_right, b_right, y_sum_sq_right) + this->scaled_lambda;
+                double left_obj = best_three_leaf_objective(
+                    static_cast<int>(left_count),
+                    y_sum_left,
+                    y_sum_sq_left,
+                    llt_left,
+                    b_left,
+                    defer_sse_left
+                );
+
+                double right_obj = best_three_leaf_objective(
+                    static_cast<int>(right_count),
+                    y_sum_right,
+                    y_sum_sq_right,
+                    llt_right,
+                    b_right,
+                    defer_sse_right
+                );
 
                 if (depth_remaining == 1)
                 {
