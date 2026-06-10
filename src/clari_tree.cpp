@@ -1152,7 +1152,8 @@ double Greedy::loss(const LLT<MatrixXd>& llt,
                     double y_sum_sq) const
 {
     VectorXd z = llt.matrixL().solve(b);
-    return y_sum_sq - z.squaredNorm();
+    const double out = y_sum_sq - z.squaredNorm();
+    return std::max(0.0, out);
 }
 
 double Greedy::constant_loss(double weight_sum, double wy_sum, double wy_sum_sq) const
@@ -1175,11 +1176,22 @@ double Greedy::best_three_leaf_objective(double weight_sum,
     }
 
     const double const_obj = constant_loss(weight_sum, wy_sum, wy_sum_sq);
-    const double linear_obj = loss(llt, b, wy_sum_sq) + rho * weight_sum;
 
     double defer_obj = std::numeric_limits<double>::infinity();
     if (has_reference_pred_ && std::isfinite(eta)) {
         defer_obj = defer_sse + eta * weight_sum;
+    }
+
+    const double best_non_linear_obj = std::min(const_obj, defer_obj);
+
+    double linear_obj = std::numeric_limits<double>::infinity();
+
+    // since ridge loss >= 0, linear_obj >= rho * weight_sum.
+    // if that lower bound is already no better than constant/defer,
+    // skip the triangular solve in the linear leaf computation
+    const double linear_lower_bound = rho * weight_sum;
+    if (linear_lower_bound < best_non_linear_obj) {
+        linear_obj = loss(llt, b, wy_sum_sq) + linear_lower_bound;
     }
 
     return this->scaled_lambda + std::min({const_obj, linear_obj, defer_obj});
@@ -1197,11 +1209,20 @@ LeafType Greedy::best_leaf_type(double weight_sum,
     }
 
     const double const_obj = constant_loss(weight_sum, wy_sum, wy_sum_sq);
-    const double linear_obj = loss(llt, b, wy_sum_sq) + rho * weight_sum;
 
     double defer_obj = std::numeric_limits<double>::infinity();
     if (has_reference_pred_ && std::isfinite(eta)) {
         defer_obj = defer_sse + eta * weight_sum;
+    }
+
+    const double best_non_linear_obj = std::min(const_obj, defer_obj);
+
+    double linear_obj = std::numeric_limits<double>::infinity();
+
+    // prune a linear computation if it is guaranteed to cost too much
+    const double linear_lower_bound = rho * weight_sum;
+    if (linear_lower_bound < best_non_linear_obj) {
+        linear_obj = loss(llt, b, wy_sum_sq) + linear_lower_bound;
     }
 
     if (const_obj <= linear_obj && const_obj <= defer_obj) {
