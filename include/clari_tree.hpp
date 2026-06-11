@@ -237,7 +237,7 @@ public:
 
 protected:
     void resolve_min_leaf_node_size();
-    bool children_respect_min_leaf_size(std::size_t left_count, std::size_t right_count) const;
+    bool children_respect_min_leaf_size(double left_weight, double right_weight) const;
     void reset_traversed_thresholds();
     void record_traversed_threshold(unsigned long int feature_idx, double threshold);
     void build_threshold_pool(const std::vector<std::vector<unsigned long int>>& sorted_indices);

@@ -452,9 +452,9 @@ void Greedy::resolve_min_leaf_node_size() {
         : default_min_leaf_node_size;
 }
 
-bool Greedy::children_respect_min_leaf_size(std::size_t left_count, std::size_t right_count) const {
-    return left_count >= resolved_min_leaf_node_size_ &&
-           right_count >= resolved_min_leaf_node_size_;
+bool Greedy::children_respect_min_leaf_size(double left_weight, double right_weight) const {
+    return left_weight >= static_cast<double>(resolved_min_leaf_node_size_) &&
+           right_weight >= static_cast<double>(resolved_min_leaf_node_size_);
 }
 
 void Greedy::reset_traversed_thresholds() {
@@ -843,7 +843,7 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
 
     if (depth_remaining == 0 ||
         node->obj <= 2 * this->scaled_lambda ||
-        node->n_instances < 2 * resolved_min_leaf_node_size_)
+        node_weight_sum < 2.0 * static_cast<double>(resolved_min_leaf_node_size_))
     {
         node->is_leaf = true;
         return node->obj;
@@ -897,7 +897,7 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
                     if (has_reference_pred_) defer_sse_right += w * this->defer_resid_sq_(row);
                 }
             }
-            if (!children_respect_min_leaf_size(left_rows.size(), right_rows.size()))
+            if (!children_respect_min_leaf_size(weight_left, weight_right))
                 continue; // not splittable
             record_traversed_threshold(feature, 0.5);
 
@@ -1000,9 +1000,7 @@ double Greedy::recursive_fit(vector<vector<unsigned long int>>& sorted_indices, 
             {
                 continue; // skip if this is not a valid split point
             }
-            const std::size_t left_count = left_indices.size();
-            const std::size_t right_count = sorted_indices[feature].size() - left_count;
-            if (!children_respect_min_leaf_size(left_count, right_count))
+            if (!children_respect_min_leaf_size(weight_left, weight_right))
             {
                 continue;
             }
@@ -1727,7 +1725,7 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
 
     if (depth_remaining == 0 ||
         node->obj <= 2 * this->scaled_lambda ||
-        node->n_instances < 2 * resolved_min_leaf_node_size_)
+        node_weight_sum < 2.0 * static_cast<double>(resolved_min_leaf_node_size_))
     {
         node->is_leaf = true;
         return node->obj;
@@ -1783,7 +1781,7 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
                     if (has_reference_pred_) defer_sse_right += w * this->defer_resid_sq_(row);
                 }
             }
-            if (!children_respect_min_leaf_size(left_rows.size(), right_rows.size()))
+            if (!children_respect_min_leaf_size(weight_left, weight_right))
                 continue; // not splittable
             record_traversed_threshold(feature, 0.5);
 
@@ -1943,9 +1941,7 @@ double CLARITree::recursive_fit(vector<vector<unsigned long int>>& sorted_indice
                 // skip if this is not a valid split point
                 continue;
             }
-            const std::size_t left_count = left_indices.size();
-            const std::size_t right_count = sorted_indices[feature].size() - left_count;
-            if (!children_respect_min_leaf_size(left_count, right_count))
+            if (!children_respect_min_leaf_size(weight_left, weight_right))
             {
                 continue;
             }
